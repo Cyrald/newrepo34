@@ -26,6 +26,15 @@ app.use(helmet({
 
 app.use(cookieParser());
 
+if (env.NODE_ENV === 'development') {
+  app.use((req, res, next) => {
+    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+    next();
+  });
+}
+
 declare module 'http' {
   interface IncomingMessage {
     rawBody: unknown
