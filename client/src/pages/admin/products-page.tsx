@@ -104,7 +104,7 @@ export default function AdminProductsPage() {
 
   const { data, isLoading } = useQuery({
     queryKey: ["adminProducts"],
-    queryFn: () => productsApi.getAll({ limit: 10000 }),
+    queryFn: () => productsApi.getAll({ limit: 10000, includeArchived: true }),
   })
 
   const { data: categoriesData } = useCategories()

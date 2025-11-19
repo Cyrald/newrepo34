@@ -222,11 +222,16 @@ export class DatabaseStorage implements IStorage {
     minPrice?: number;
     maxPrice?: number;
     isNew?: boolean;
+    includeArchived?: boolean;
     sortBy?: "price_asc" | "price_desc" | "popularity" | "newest" | "rating";
     limit?: number;
     offset?: number;
   }): Promise<{ products: Product[], total: number }> {
-    const conditions = [eq(products.isArchived, false)];
+    const conditions = [];
+    
+    if (!filters?.includeArchived) {
+      conditions.push(eq(products.isArchived, false));
+    }
     
     if (filters?.categoryId) {
       conditions.push(eq(products.categoryId, filters.categoryId));

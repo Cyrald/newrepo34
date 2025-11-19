@@ -131,6 +131,7 @@ export const productsApi = {
     sortBy?: "price_asc" | "price_desc" | "popularity" | "newest" | "rating";
     page?: number;
     limit?: number;
+    includeArchived?: boolean;
   }) => {
     const searchParams = new URLSearchParams();
     if (params) {
