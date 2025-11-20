@@ -1,6 +1,6 @@
 import { useState } from "react"
 import { Link, useLocation } from "wouter"
-import { Search, ShoppingCart, Heart, User, Menu, X, MessageCircle, LayoutDashboard } from "lucide-react"
+import { Search, ShoppingCart, Heart, User, Menu, X, LayoutDashboard } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Badge } from "@/components/ui/badge"
@@ -12,13 +12,11 @@ import {
 } from "@/components/ui/sheet"
 import { useAuthStore } from "@/stores/authStore"
 import { useCartStore } from "@/stores/cartStore"
-import { SupportChatWidget } from "@/components/support-chat-widget"
 
 export function Header() {
   const [location] = useLocation()
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
   const [searchQuery, setSearchQuery] = useState("")
-  const [isSupportChatOpen, setIsSupportChatOpen] = useState(false)
 
   const isAuthenticated = useAuthStore((state) => state.isAuthenticated)
   const user = useAuthStore((state) => state.user)
@@ -112,33 +110,20 @@ export function Header() {
             </Link>
           </Button>
 
-          {/* Support/Admin Panel Button */}
-          {isAuthenticated && (
-            hasStaffRole ? (
-              <Button
-                variant="outline"
-                size="sm"
-                asChild
-                className="hidden sm:inline-flex gap-2"
-                data-testid="link-admin-panel"
-              >
-                <Link href="/admin">
-                  <LayoutDashboard className="h-4 w-4" />
-                  Админ панель
-                </Link>
-              </Button>
-            ) : (
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => setIsSupportChatOpen(true)}
-                className="hidden sm:inline-flex gap-2"
-                data-testid="button-support"
-              >
-                <MessageCircle className="h-4 w-4" />
-                Поддержка
-              </Button>
-            )
+          {/* Admin Panel Button */}
+          {isAuthenticated && hasStaffRole && (
+            <Button
+              variant="outline"
+              size="sm"
+              asChild
+              className="hidden sm:inline-flex gap-2"
+              data-testid="link-admin-panel"
+            >
+              <Link href="/admin">
+                <LayoutDashboard className="h-4 w-4" />
+                Админ панель
+              </Link>
+            </Button>
           )}
 
           {isAuthenticated ? (
@@ -187,28 +172,13 @@ export function Header() {
                     Избранное
                   </Button>
                 </Link>
-                {isAuthenticated && (
-                  hasStaffRole ? (
-                    <Link href="/admin" onClick={() => setMobileMenuOpen(false)}>
-                      <Button variant="outline" className="w-full justify-start gap-2" data-testid="link-admin-panel-mobile">
-                        <LayoutDashboard className="h-4 w-4" />
-                        Админ панель
-                      </Button>
-                    </Link>
-                  ) : (
-                    <Button
-                      variant="outline"
-                      className="w-full justify-start gap-2"
-                      onClick={() => {
-                        setMobileMenuOpen(false)
-                        setIsSupportChatOpen(true)
-                      }}
-                      data-testid="button-support-mobile"
-                    >
-                      <MessageCircle className="h-4 w-4" />
-                      Поддержка
+                {isAuthenticated && hasStaffRole && (
+                  <Link href="/admin" onClick={() => setMobileMenuOpen(false)}>
+                    <Button variant="outline" className="w-full justify-start gap-2" data-testid="link-admin-panel-mobile">
+                      <LayoutDashboard className="h-4 w-4" />
+                      Админ панель
                     </Button>
-                  )
+                  </Link>
                 )}
                 {!isAuthenticated && (
                   <Link href="/login" onClick={() => setMobileMenuOpen(false)}>
@@ -269,12 +239,6 @@ export function Header() {
           </nav>
         </div>
       </div>
-
-      {/* Support Chat Widget */}
-      <SupportChatWidget
-        isOpen={isSupportChatOpen}
-        onClose={() => setIsSupportChatOpen(false)}
-      />
     </header>
   )
 }

@@ -7,6 +7,7 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { ThemeProvider } from "@/providers/theme-provider";
 import { AuthProvider } from "@/providers/auth-provider";
 import { ProtectedRoute } from "@/components/ProtectedRoute";
+import { SupportChatLauncher } from "@/components/support-chat-launcher";
 
 const NotFound = lazy(() => import("@/pages/not-found"));
 const HomePage = lazy(() => import("@/pages/home-page"));
@@ -130,6 +131,7 @@ function App() {
             <Suspense fallback={<PageLoadingFallback />}>
               <Router />
             </Suspense>
+            <SupportChatLauncher />
           </TooltipProvider>
         </AuthProvider>
       </ThemeProvider>

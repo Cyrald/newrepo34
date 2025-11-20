@@ -90,19 +90,57 @@ export default function AdminSupportChatPage() {
   })
 
   // Send message mutation
-  const sendMessageMutation = useMutation({
+  const sendMessageMutation = useMutation<SupportMessage, Error, { userId: string; text: string }>({
     mutationFn: async (data: { userId: string; text: string }) => {
-      return apiRequest("POST", "/api/support/messages", {
+      return apiRequest<SupportMessage>("POST", "/api/support/messages", {
         userId: data.userId,
         messageText: data.text,
       })
     },
-    onSuccess: () => {
+    onMutate: async (data) => {
+      // Cancel outgoing refetches
+      await queryClient.cancelQueries({ queryKey: ["/api/support/messages", { userId: selectedUserId }] })
+
+      // Snapshot previous value
+      const previousMessages = queryClient.getQueryData<SupportMessage[]>(["/api/support/messages", { userId: selectedUserId }])
+
+      // Optimistically update with temp message
+      if (previousMessages && user?.id) {
+        const tempMessage: SupportMessage = {
+          id: `temp-${Date.now()}`,
+          userId: data.userId,
+          senderId: user.id,
+          messageText: data.text,
+          createdAt: new Date(),
+        } as SupportMessage
+
+        queryClient.setQueryData<SupportMessage[]>(
+          ["/api/support/messages", { userId: selectedUserId }],
+          [...previousMessages, tempMessage]
+        )
+      }
+
+      return { previousMessages }
+    },
+    onSuccess: (data) => {
       setMessage("")
-      queryClient.invalidateQueries({ queryKey: ["/api/support/messages", { userId: selectedUserId }] })
+      // Update with real message from server
+      queryClient.setQueryData<SupportMessage[]>(
+        ["/api/support/messages", { userId: selectedUserId }],
+        (old) => {
+          if (!old) return [data]
+          // Replace temp message with real one
+          return old.filter(m => !m.id.startsWith('temp-')).concat(data)
+        }
+      )
+      // Update conversations list
       queryClient.invalidateQueries({ queryKey: ["/api/support/conversations"] })
     },
-    onError: () => {
+    onError: (_error, _variables, context) => {
+      // Rollback on error
+      if (context?.previousMessages) {
+        queryClient.setQueryData(["/api/support/messages", { userId: selectedUserId }], context.previousMessages)
+      }
       toast({
         title: "Ошибка",
         description: "Не удалось отправить сообщение",
@@ -117,8 +155,18 @@ export default function AdminSupportChatPage() {
       wsClient.connect(user.id)
 
       const unsubscribe = wsClient.onMessage((msg) => {
-        if (msg.type === "new_message") {
-          queryClient.invalidateQueries({ queryKey: ["/api/support/messages"] })
+        if (msg.type === "new_message" && msg.message) {
+          // Directly add the message to the cache for the relevant conversation
+          queryClient.setQueryData<SupportMessage[]>(
+            ["/api/support/messages", { userId: msg.message.userId }],
+            (old) => {
+              if (!old) return [msg.message]
+              // Avoid duplicates
+              if (old.some(m => m.id === msg.message.id)) return old
+              return [...old, msg.message]
+            }
+          )
+          // Update conversations list
           queryClient.invalidateQueries({ queryKey: ["/api/support/conversations"] })
         }
       })
@@ -182,10 +230,10 @@ export default function AdminSupportChatPage() {
         </p>
       </div>
 
-      <div className="grid grid-cols-12 gap-6 h-[calc(100vh-200px)]">
+      <div className="grid grid-cols-12 gap-6 min-h-[calc(100vh-160px)]">
         {/* Conversations List - Left Sidebar */}
-        <Card className="col-span-3">
-          <CardHeader>
+        <Card className="col-span-3 flex flex-col">
+          <CardHeader className="pb-3">
             <CardTitle className="text-lg">Диалоги</CardTitle>
             <div className="flex gap-2 mt-3">
               <Button
@@ -206,8 +254,8 @@ export default function AdminSupportChatPage() {
               </Button>
             </div>
           </CardHeader>
-          <CardContent className="p-0">
-            <ScrollArea className="h-[calc(100vh-400px)]">
+          <CardContent className="p-0 flex-1 overflow-hidden">
+            <ScrollArea className="h-full">
               {conversations.length === 0 ? (
                 <div className="p-6 text-center text-muted-foreground">
                   <MessageCircle className="h-12 w-12 mx-auto mb-2 opacity-50" />
@@ -253,8 +301,8 @@ export default function AdminSupportChatPage() {
         </Card>
 
         {/* Active Chat - Center */}
-        <Card className="col-span-6">
-          <CardHeader className="border-b">
+        <Card className="col-span-6 flex flex-col">
+          <CardHeader className="border-b pb-3">
             <div className="flex items-center justify-between">
               <CardTitle className="text-lg flex items-center gap-2">
                 <MessageCircle className="h-5 w-5" />
@@ -282,7 +330,7 @@ export default function AdminSupportChatPage() {
               )}
             </div>
           </CardHeader>
-          <CardContent className="p-0 flex flex-col h-[calc(100vh-280px)]">
+          <CardContent className="p-0 flex flex-col flex-1 min-h-0">
             {!selectedUserId ? (
               <div className="flex-1 flex items-center justify-center text-muted-foreground">
                 <div className="text-center">
@@ -302,7 +350,7 @@ export default function AdminSupportChatPage() {
                       </div>
                     </div>
                   ) : (
-                    <div className="space-y-4">
+                    <div className="space-y-3">
                       {messages.map((msg) => {
                         const isCustomerMessage = msg.senderId === selectedUserId
                         return (
@@ -313,17 +361,17 @@ export default function AdminSupportChatPage() {
                             }`}
                           >
                             <div
-                              className={`max-w-[80%] rounded-lg px-3 py-2 ${
+                              className={`max-w-[75%] rounded-2xl px-4 py-2.5 shadow-sm ${
                                 isCustomerMessage
-                                  ? "bg-muted"
-                                  : "bg-primary text-primary-foreground"
+                                  ? "bg-muted/70 rounded-tl-sm"
+                                  : "bg-primary text-primary-foreground rounded-tr-sm"
                               }`}
                             >
-                              <p className="text-sm whitespace-pre-wrap break-words">
+                              <p className="text-sm leading-relaxed whitespace-pre-wrap break-words">
                                 {msg.messageText}
                               </p>
                             </div>
-                            <span className="text-xs text-muted-foreground">
+                            <span className="text-xs text-muted-foreground px-1">
                               {format(new Date(msg.createdAt), "HH:mm", { locale: ru })}
                             </span>
                           </div>
@@ -334,27 +382,27 @@ export default function AdminSupportChatPage() {
                 </ScrollArea>
 
                 {/* Input */}
-                <div className="p-4 border-t">
-                  <div className="flex gap-2">
+                <div className="p-4 border-t bg-muted/20">
+                  <div className="flex gap-3">
                     <Textarea
                       placeholder="Введите ответ..."
                       value={message}
                       onChange={(e) => setMessage(e.target.value)}
                       onKeyDown={handleKeyPress}
                       rows={2}
-                      className="resize-none"
+                      className="resize-none flex-1 bg-background"
                     />
                     <Button
                       onClick={handleSendMessage}
                       disabled={!message.trim() || sendMessageMutation.isPending}
                       size="icon"
-                      className="h-auto"
+                      className="h-auto px-4"
                     >
-                      <Send className="h-4 w-4" />
+                      <Send className="h-5 w-5" />
                     </Button>
                   </div>
-                  <p className="text-xs text-muted-foreground mt-2">
-                    Нажмите Enter для отправки, Shift+Enter для новой строки
+                  <p className="text-xs text-muted-foreground mt-2 px-1">
+                    Enter — отправить, Shift+Enter — новая строка
                   </p>
                 </div>
               </>
@@ -363,8 +411,8 @@ export default function AdminSupportChatPage() {
         </Card>
 
         {/* Customer Info - Right Sidebar */}
-        <Card className="col-span-3">
-          <CardHeader>
+        <Card className="col-span-3 flex flex-col">
+          <CardHeader className="pb-3">
             <CardTitle className="text-lg">Информация о клиенте</CardTitle>
           </CardHeader>
           <CardContent>
