@@ -1264,7 +1264,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   app.get("/api/support/conversations", authenticateToken, requireRole("admin", "consultant"), async (req, res) => {
     try {
-      const status = req.query.status as 'active' | 'archived' | undefined;
+      const status = req.query.status as 'open' | 'archived' | 'closed' | undefined;
       const conversations = await storage.getAllSupportConversations(status);
       res.json(conversations);
     } catch (error) {
@@ -1333,8 +1333,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
         userId = req.body.userId;
       }
       
-      // Create or activate conversation when user sends a message
+      // Create or reopen conversation when user sends a message (auto-reopens from archived)
       await storage.getOrCreateConversation(userId);
+      
+      // Update last message time
+      await storage.updateLastMessageTime(userId);
       
       const message = await storage.createSupportMessage({
         userId: userId,
@@ -1376,9 +1379,98 @@ export async function registerRoutes(app: Express): Promise<Server> {
   app.put("/api/support/conversations/:userId/archive", authenticateToken, requireRole("admin", "consultant"), async (req, res) => {
     try {
       await storage.archiveConversation(req.params.userId);
+      
+      // Notify user via WebSocket
+      const userConnection = connectedUsers.get(req.params.userId);
+      if (userConnection?.ws && userConnection.ws.readyState === WebSocket.OPEN) {
+        userConnection.ws.send(JSON.stringify({
+          type: "conversation_archived",
+          userId: req.params.userId
+        }));
+      }
+      
+      res.json({ message: "Обращение архивировано" });
+    } catch (error) {
+      res.status(500).json({ message: "Ошибка архивации обращения" });
+    }
+  });
+
+  // Close conversation (final)
+  app.put("/api/support/conversations/:userId/close", authenticateToken, requireRole("admin", "consultant"), async (req, res) => {
+    try {
+      await storage.closeConversation(req.params.userId);
+      
+      // Notify user via WebSocket
+      const userConnection = connectedUsers.get(req.params.userId);
+      if (userConnection?.ws && userConnection.ws.readyState === WebSocket.OPEN) {
+        userConnection.ws.send(JSON.stringify({
+          type: "conversation_closed",
+          userId: req.params.userId
+        }));
+      }
+      
       res.json({ message: "Обращение закрыто" });
     } catch (error) {
       res.status(500).json({ message: "Ошибка закрытия обращения" });
+    }
+  });
+
+  // Reopen conversation
+  app.put("/api/support/conversations/:userId/reopen", authenticateToken, requireRole("admin", "consultant"), async (req, res) => {
+    try {
+      await storage.reopenConversation(req.params.userId);
+      
+      // Notify admins via WebSocket
+      for (const [connUserId, connection] of Array.from(connectedUsers.entries())) {
+        const isStaff = connection.roles.some((role: string) => ['admin', 'consultant'].includes(role));
+        if (isStaff && connection.ws.readyState === WebSocket.OPEN) {
+          connection.ws.send(JSON.stringify({
+            type: "conversation_reopened",
+            userId: req.params.userId
+          }));
+        }
+      }
+      
+      res.json({ message: "Обращение переоткрыто" });
+    } catch (error) {
+      res.status(500).json({ message: "Ошибка переоткрытия обращения" });
+    }
+  });
+
+  // Get conversation status (for customer)
+  app.get("/api/support/conversation-status", authenticateToken, async (req, res) => {
+    try {
+      const status = await storage.getConversationStatus(req.userId!);
+      if (!status) {
+        return res.json({ status: 'none' });
+      }
+      res.json(status);
+    } catch (error) {
+      res.status(500).json({ message: "Ошибка получения статуса обращения" });
+    }
+  });
+
+  // Search closed conversations
+  app.get("/api/support/closed-search", authenticateToken, requireRole("admin", "consultant"), async (req, res) => {
+    try {
+      const filters: { email?: string; dateFrom?: Date; dateTo?: Date } = {};
+      
+      if (req.query.email) {
+        filters.email = req.query.email as string;
+      }
+      
+      if (req.query.dateFrom) {
+        filters.dateFrom = new Date(req.query.dateFrom as string);
+      }
+      
+      if (req.query.dateTo) {
+        filters.dateTo = new Date(req.query.dateTo as string);
+      }
+      
+      const conversations = await storage.searchClosedConversations(filters);
+      res.json(conversations);
+    } catch (error) {
+      res.status(500).json({ message: "Ошибка поиска закрытых обращений" });
     }
   });
 

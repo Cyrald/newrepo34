@@ -126,7 +126,7 @@ export interface IStorage {
   deleteWishlistItem(userId: string, productId: string): Promise<void>;
   
   getSupportMessages(userId: string): Promise<SupportMessage[]>;
-  getAllSupportConversations(status?: 'active' | 'archived'): Promise<{ userId: string; lastMessage: SupportMessage; unreadCount: number; status: string }[]>;
+  getAllSupportConversations(status?: 'open' | 'archived' | 'closed'): Promise<{ userId: string; lastMessage: SupportMessage; status: string; archivedAt: Date | null; closedAt: Date | null }[]>;
   createSupportMessage(message: InsertSupportMessage): Promise<SupportMessage>;
   markMessageAsRead(id: string): Promise<void>;
   
@@ -135,8 +135,13 @@ export interface IStorage {
   deleteSupportMessageAttachment(id: string): Promise<void>;
   
   getOrCreateConversation(userId: string): Promise<SupportConversation>;
+  getActiveConversation(userId: string): Promise<SupportConversation | undefined>;
+  getConversationStatus(userId: string): Promise<{ status: string } | undefined>;
   archiveConversation(userId: string): Promise<void>;
-  activateConversation(userId: string): Promise<void>;
+  closeConversation(userId: string): Promise<void>;
+  reopenConversation(userId: string): Promise<void>;
+  updateLastMessageTime(userId: string): Promise<void>;
+  searchClosedConversations(filters: { email?: string; dateFrom?: Date; dateTo?: Date }): Promise<{ userId: string; lastMessage: SupportMessage; status: string; closedAt: Date | null }[]>;
   deleteOldMessages(olderThanDays: number): Promise<number>;
 }
 
@@ -694,7 +699,7 @@ export class DatabaseStorage implements IStorage {
     return db.select().from(supportMessages).where(eq(supportMessages.userId, userId)).orderBy(supportMessages.createdAt);
   }
 
-  async getAllSupportConversations(status?: 'active' | 'archived'): Promise<{ userId: string; lastMessage: SupportMessage; unreadCount: number; status: string }[]> {
+  async getAllSupportConversations(status?: 'open' | 'archived' | 'closed'): Promise<{ userId: string; lastMessage: SupportMessage; status: string; archivedAt: Date | null; closedAt: Date | null }[]> {
     // Get all conversations with optional status filter
     let conversationQuery = db.select().from(supportConversations);
     
@@ -702,7 +707,7 @@ export class DatabaseStorage implements IStorage {
       conversationQuery = conversationQuery.where(eq(supportConversations.status, status)) as any;
     }
     
-    const allConversations = await conversationQuery;
+    const allConversations = await conversationQuery.orderBy(desc(supportConversations.lastMessageAt));
     
     const result = [];
     
@@ -716,18 +721,12 @@ export class DatabaseStorage implements IStorage {
         .limit(1);
       
       if (lastMessage) {
-        const unreadCount = await db.select({ count: sql<number>`count(*)` })
-          .from(supportMessages)
-          .where(and(
-            eq(supportMessages.userId, conv.userId),
-            eq(supportMessages.isRead, false)
-          ));
-        
         result.push({
           userId: conv.userId,
           lastMessage,
-          unreadCount: Number(unreadCount[0]?.count || 0),
-          status: conv.status
+          status: conv.status,
+          archivedAt: conv.archivedAt,
+          closedAt: conv.closedAt
         });
       }
     }
@@ -758,44 +757,168 @@ export class DatabaseStorage implements IStorage {
   }
 
   async getOrCreateConversation(userId: string): Promise<SupportConversation> {
+    // Get active conversation for user
     const [existing] = await db
       .select()
       .from(supportConversations)
-      .where(eq(supportConversations.userId, userId))
+      .where(and(
+        eq(supportConversations.userId, userId),
+        eq(supportConversations.status, 'open')
+      ))
       .limit(1);
     
     if (existing) {
-      // If conversation is archived, activate it when user sends a message
-      if (existing.status === 'archived') {
-        const [activated] = await db
-          .update(supportConversations)
-          .set({ status: 'active', updatedAt: new Date(), archivedAt: null })
-          .where(eq(supportConversations.userId, userId))
-          .returning();
-        return activated;
-      }
       return existing;
     }
     
+    // Check if there's an archived conversation - reopen it
+    const [archived] = await db
+      .select()
+      .from(supportConversations)
+      .where(and(
+        eq(supportConversations.userId, userId),
+        eq(supportConversations.status, 'archived')
+      ))
+      .limit(1);
+    
+    if (archived) {
+      const [reopened] = await db
+        .update(supportConversations)
+        .set({ status: 'open', archivedAt: null, lastMessageAt: new Date(), updatedAt: new Date() })
+        .where(eq(supportConversations.id, archived.id))
+        .returning();
+      return reopened;
+    }
+    
+    // If closed, create new conversation
     const [conversation] = await db
       .insert(supportConversations)
-      .values({ userId, status: 'active' })
+      .values({ userId, status: 'open' })
       .returning();
     return conversation;
   }
 
-  async archiveConversation(userId: string): Promise<void> {
-    await db
-      .update(supportConversations)
-      .set({ status: 'archived', archivedAt: new Date(), updatedAt: new Date() })
-      .where(eq(supportConversations.userId, userId));
+  async getActiveConversation(userId: string): Promise<SupportConversation | undefined> {
+    const [conversation] = await db
+      .select()
+      .from(supportConversations)
+      .where(and(
+        eq(supportConversations.userId, userId),
+        or(
+          eq(supportConversations.status, 'open'),
+          eq(supportConversations.status, 'archived')
+        )
+      ))
+      .orderBy(desc(supportConversations.lastMessageAt))
+      .limit(1);
+    
+    return conversation;
   }
 
-  async activateConversation(userId: string): Promise<void> {
-    await db
-      .update(supportConversations)
-      .set({ status: 'active', archivedAt: null, updatedAt: new Date() })
-      .where(eq(supportConversations.userId, userId));
+  async getConversationStatus(userId: string): Promise<{ status: string } | undefined> {
+    const conversation = await this.getActiveConversation(userId);
+    return conversation ? { status: conversation.status } : undefined;
+  }
+
+  async archiveConversation(userId: string): Promise<void> {
+    const conversation = await this.getActiveConversation(userId);
+    if (conversation) {
+      await db
+        .update(supportConversations)
+        .set({ status: 'archived', archivedAt: new Date(), updatedAt: new Date() })
+        .where(eq(supportConversations.id, conversation.id));
+    }
+  }
+
+  async closeConversation(userId: string): Promise<void> {
+    const conversation = await this.getActiveConversation(userId);
+    if (conversation) {
+      await db
+        .update(supportConversations)
+        .set({ status: 'closed', closedAt: new Date(), updatedAt: new Date() })
+        .where(eq(supportConversations.id, conversation.id));
+    }
+  }
+
+  async reopenConversation(userId: string): Promise<void> {
+    const [conversation] = await db
+      .select()
+      .from(supportConversations)
+      .where(and(
+        eq(supportConversations.userId, userId),
+        eq(supportConversations.status, 'archived')
+      ))
+      .limit(1);
+    
+    if (conversation) {
+      await db
+        .update(supportConversations)
+        .set({ status: 'open', archivedAt: null, lastMessageAt: new Date(), updatedAt: new Date() })
+        .where(eq(supportConversations.id, conversation.id));
+    }
+  }
+
+  async updateLastMessageTime(userId: string): Promise<void> {
+    const conversation = await this.getActiveConversation(userId);
+    if (conversation) {
+      await db
+        .update(supportConversations)
+        .set({ lastMessageAt: new Date(), updatedAt: new Date() })
+        .where(eq(supportConversations.id, conversation.id));
+    }
+  }
+
+  async searchClosedConversations(filters: { email?: string; dateFrom?: Date; dateTo?: Date }): Promise<{ userId: string; lastMessage: SupportMessage; status: string; closedAt: Date | null }[]> {
+    let query = db
+      .select({
+        conversation: supportConversations,
+        user: users
+      })
+      .from(supportConversations)
+      .innerJoin(users, eq(supportConversations.userId, users.id))
+      .where(eq(supportConversations.status, 'closed'));
+    
+    const conditions = [];
+    
+    if (filters.email) {
+      conditions.push(like(users.email, `%${filters.email}%`));
+    }
+    
+    if (filters.dateFrom) {
+      conditions.push(gte(supportConversations.closedAt, filters.dateFrom));
+    }
+    
+    if (filters.dateTo) {
+      conditions.push(lte(supportConversations.closedAt, filters.dateTo));
+    }
+    
+    if (conditions.length > 0) {
+      query = query.where(and(...conditions)) as any;
+    }
+    
+    const results = await query.orderBy(desc(supportConversations.closedAt));
+    
+    const finalResults = [];
+    
+    for (const { conversation } of results) {
+      const [lastMessage] = await db
+        .select()
+        .from(supportMessages)
+        .where(eq(supportMessages.userId, conversation.userId))
+        .orderBy(desc(supportMessages.createdAt))
+        .limit(1);
+      
+      if (lastMessage) {
+        finalResults.push({
+          userId: conversation.userId,
+          lastMessage,
+          status: conversation.status,
+          closedAt: conversation.closedAt
+        });
+      }
+    }
+    
+    return finalResults;
   }
 
   async deleteOldMessages(olderThanDays: number): Promise<number> {
