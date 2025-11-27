@@ -5,8 +5,16 @@ import helmet from "helmet";
 import cookieParser from "cookie-parser";
 import { env } from "./env";
 import { sessionMiddleware } from "./session";
+import { corsMiddleware } from "./middleware/cors";
+import { requestLogger } from "./middleware/requestLogger";
+import { errorHandler } from "./middleware/errorHandler";
+import { generalApiLimiter } from "./middleware/rateLimiter";
 
 const app = express();
+
+app.set('trust proxy', 1);
+
+app.use(corsMiddleware);
 
 app.use(helmet({
   contentSecurityPolicy: env.NODE_ENV === 'production' ? {
@@ -25,6 +33,7 @@ app.use(helmet({
   crossOriginEmbedderPolicy: false,
 }));
 
+app.use(requestLogger);
 app.use(cookieParser());
 app.use(sessionMiddleware);
 
@@ -62,63 +71,15 @@ app.use(express.urlencoded({
   type: 'application/x-www-form-urlencoded' // Явно указываем тип
 }));
 
-app.use((req, res, next) => {
-  const start = Date.now();
-  const path = req.path;
-  let capturedJsonResponse: Record<string, any> | undefined = undefined;
-
-  const originalResJson = res.json;
-  res.json = function (bodyJson, ...args) {
-    capturedJsonResponse = bodyJson;
-    return originalResJson.apply(res, [bodyJson, ...args]);
-  };
-
-  res.on("finish", () => {
-    const duration = Date.now() - start;
-    if (path.startsWith("/api")) {
-      let logLine = `${req.method} ${path} ${res.statusCode} in ${duration}ms`;
-      if (capturedJsonResponse) {
-        logLine += ` :: ${JSON.stringify(capturedJsonResponse)}`;
-      }
-
-      if (logLine.length > 80) {
-        logLine = logLine.slice(0, 79) + "…";
-      }
-
-      log(logLine);
-    }
-  });
-
-  next();
-});
 
 (async () => {
   app.use('/uploads', express.static('uploads'));
   
+  app.use('/api', generalApiLimiter);
+  
   const server = await registerRoutes(app);
 
-  app.use((err: any, req: Request, res: Response, _next: NextFunction) => {
-    const status = err.status || err.statusCode || 500;
-    
-    console.error('Error:', {
-      message: err.message,
-      stack: env.NODE_ENV === 'development' ? err.stack : undefined,
-      path: req.path,
-      method: req.method,
-      userId: req.userId,
-    });
-    
-    let message: string;
-    if (status >= 500) {
-      message = "Внутренняя ошибка сервера";
-    } else if (status >= 400 && status < 500) {
-      message = err.message || "Некорректный запрос";
-    } else {
-      message = err.message || "Ошибка сервера";
-    }
-    
-    res.status(status).json({ message });
-  });
+  app.use(errorHandler);
 
   // importantly only setup vite in development and after
   // setting up all the other routes so the catch-all route

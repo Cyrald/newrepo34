@@ -2,25 +2,17 @@ import rateLimit from 'express-rate-limit';
 
 export const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 5,
-  message: 'Слишком много попыток входа. Попробуйте позже через 15 минут.',
+  max: 15,
+  skipSuccessfulRequests: true,
+  message: 'Слишком много попыток входа. Попробуйте через 15 минут.',
   standardHeaders: true,
   legacyHeaders: false,
-  skipSuccessfulRequests: false,
 });
 
 export const registerLimiter = rateLimit({
   windowMs: 60 * 60 * 1000,
-  max: 3,
-  message: 'Слишком много попыток регистрации. Попробуйте позже через 1 час.',
-  standardHeaders: true,
-  legacyHeaders: false,
-});
-
-export const promocodeValidationLimiter = rateLimit({
-  windowMs: 60 * 1000,
-  max: 10,
-  message: 'Слишком много попыток проверки промокода. Попробуйте позже.',
+  max: 5,
+  message: 'Слишком много регистраций. Попробуйте позже.',
   standardHeaders: true,
   legacyHeaders: false,
 });
@@ -28,10 +20,39 @@ export const promocodeValidationLimiter = rateLimit({
 export const apiLimiter = rateLimit({
   windowMs: 1 * 60 * 1000,
   max: 100,
-  message: 'Слишком много запросов. Попробуйте позже.',
+  message: 'Слишком много запросов. Попробуйте через минуту.',
   standardHeaders: true,
   legacyHeaders: false,
-  skip: (req) => {
-    return req.path.startsWith('/api/products') && req.method === 'GET';
-  },
+});
+
+export const uploadLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 30,
+  message: 'Слишком много загрузок. Лимит: 30 в час.',
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+export const searchLimiter = rateLimit({
+  windowMs: 1 * 60 * 1000,
+  max: 60,
+  message: 'Слишком много поисковых запросов.',
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+export const promocodeValidationLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 20,
+  message: 'Слишком много попыток валидации промокода.',
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+export const generalApiLimiter = rateLimit({
+  windowMs: 1 * 60 * 1000,
+  max: 120,
+  message: 'Слишком много запросов.',
+  standardHeaders: true,
+  legacyHeaders: false,
 });

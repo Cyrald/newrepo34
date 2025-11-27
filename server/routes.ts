@@ -37,6 +37,9 @@ import {
   authLimiter,
   registerLimiter,
   promocodeValidationLimiter,
+  uploadLimiter,
+  searchLimiter,
+  generalApiLimiter,
 } from "./middleware/rateLimiter";
 import { sanitizeSearchQuery, sanitizeNumericParam, sanitizeId } from "./utils/sanitize";
 import { eq, sql, and } from "drizzle-orm";
@@ -232,20 +235,26 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const roles = await storage.getUserRoles(user.id);
       const roleNames = roles.map(r => r.role);
       
-      req.session.userId = user.id;
-      req.session.userRoles = roleNames;
+      req.session.regenerate((err) => {
+        if (err) {
+          return res.status(500).json({ message: "Ошибка входа" });
+        }
+        
+        req.session.userId = user.id;
+        req.session.userRoles = roleNames;
 
-      res.json({
-        user: {
-          id: user.id,
-          email: user.email,
-          firstName: user.firstName,
-          lastName: user.lastName,
-          phone: user.phone,
-          isVerified: user.isVerified,
-          bonusBalance: user.bonusBalance,
-          roles: roleNames,
-        },
+        res.json({
+          user: {
+            id: user.id,
+            email: user.email,
+            firstName: user.firstName,
+            lastName: user.lastName,
+            phone: user.phone,
+            isVerified: user.isVerified,
+            bonusBalance: user.bonusBalance,
+            roles: roleNames,
+          },
+        });
       });
     } catch (error) {
       if (error instanceof z.ZodError) {
@@ -600,7 +609,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  app.get("/api/products", async (req, res) => {
+  app.get("/api/products", searchLimiter, async (req, res) => {
     try {
       const {
         categoryId,
@@ -615,8 +624,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
         offset = "0",
       } = req.query;
 
-      const limitNum = Math.min(sanitizeNumericParam(limit as string, 20), 10000);
-      const offsetNum = sanitizeNumericParam(offset as string, 0);
+      const limitNum = sanitizeNumericParam(limit as string, 1, 10000, 20);
+      const offsetNum = sanitizeNumericParam(offset as string, 0, 100000, 0);
       const sanitizedSearch = sanitizeSearchQuery(search as string);
 
       let categoryIdsArray: string[] | undefined;
@@ -682,6 +691,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
     "/api/products",
     authenticateToken,
     requireRole("admin", "marketer"),
+    uploadLimiter,
     productFormDataUpload.none(),
     async (req, res) => {
       try {
@@ -782,6 +792,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
     "/api/products/:id/images",
     authenticateToken,
     requireRole("admin", "marketer"),
+    uploadLimiter,
     productImagesUpload.array("images", 10),
     async (req, res) => {
       try {

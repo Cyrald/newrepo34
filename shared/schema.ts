@@ -558,13 +558,13 @@ export type InsertSupportMessageAttachment = z.infer<typeof insertSupportMessage
 
 // Регистрация
 export const registerSchema = z.object({
-  email: z.string().email("Неверный формат email"),
-  password: z.string().min(8, "Пароль должен быть не менее 8 символов"),
+  email: z.string().email("Неверный формат email").max(255, "Email слишком длинный"),
+  password: z.string().min(8, "Пароль должен быть не менее 8 символов").max(100, "Пароль слишком длинный"),
   confirmPassword: z.string(),
-  firstName: z.string().min(1, "Имя обязательно"),
-  lastName: z.string().optional(),
-  patronymic: z.string().optional(),
-  phone: z.string().min(10, "Неверный формат телефона"),
+  firstName: z.string().min(1, "Имя обязательно").max(100, "Имя слишком длинное"),
+  lastName: z.string().max(100, "Фамилия слишком длинная").optional(),
+  patronymic: z.string().max(100, "Отчество слишком длинное").optional(),
+  phone: z.string().min(10, "Неверный формат телефона").max(20, "Телефон слишком длинный"),
   agreeToTerms: z.boolean().refine((val) => val === true, "Необходимо согласие с условиями"),
 }).refine((data) => data.password === data.confirmPassword, {
   message: "Пароли не совпадают",
@@ -573,8 +573,8 @@ export const registerSchema = z.object({
 
 // Вход
 export const loginSchema = z.object({
-  email: z.string().email("Неверный формат email"),
-  password: z.string().min(1, "Пароль обязателен"),
+  email: z.string().email("Неверный формат email").max(255, "Email слишком длинный"),
+  password: z.string().min(1, "Пароль обязателен").max(100, "Пароль слишком длинный"),
 });
 
 // Создание заказа
