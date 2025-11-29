@@ -32,6 +32,11 @@ Preferred communication style: Simple, everyday language.
 **Server Framework:**
 - Node.js with Express.js, developed in TypeScript.
 - RESTful API endpoints under `/api`.
+- **Modular Routes Architecture** (November 2025):
+  - Transformed monolithic `routes.ts` (1862 lines) into 12 modular route files in `server/routes/`
+  - Each module handles specific domain: health, auth, products, cart, wishlist, addresses, payment-cards, categories, promocodes, orders, admin, support
+  - Central router in `server/routes.ts` with WebSocket setup and session validation
+  - Original monolith preserved as `routes.old.ts` for reference
 
 **Authentication & Authorization:**
 - Session-based authentication with PostgreSQL session store and `bcrypt` for password hashing.
@@ -110,3 +115,42 @@ Preferred communication style: Simple, everyday language.
   - Human-readable colored output in development
   - Structured metadata for better debugging
   - Error and rejection handling
+
+### Modular Routes Architecture (November 2025)
+
+**Implementation Status:** ✅ Functional, ⚠️ Tech Debt Exists
+
+**Created Modules:**
+1. `server/routes/health.routes.ts` - Health check endpoints
+2. `server/routes/auth.routes.ts` - Authentication & registration
+3. `server/routes/products.routes.ts` - Product CRUD with image upload
+4. `server/routes/cart.routes.ts` - Shopping cart management
+5. `server/routes/wishlist.routes.ts` - Wishlist operations
+6. `server/routes/addresses.routes.ts` - User addresses with setDefault
+7. `server/routes/payment-cards.routes.ts` - Payment cards with setDefault
+8. `server/routes/categories.routes.ts` - Category management
+9. `server/routes/promocodes.routes.ts` - Promocode validation
+10. `server/routes/orders.routes.ts` - Order processing with DB transactions (WebSocket notifications NOT restored)
+11. `server/routes/admin.routes.ts` - Basic admin statistics & user listing (subset of original)
+12. `server/routes/support.routes.ts` - Support chat REST API (WebSocket handled in main router)
+
+**Benefits:**
+- Improved code maintainability and readability
+- Clear separation of concerns by domain
+- Easier testing and debugging
+- Reduced merge conflicts in team development
+
+**Known Issues (Blocking Production Readiness):**
+1. **⚠️ CRITICAL - Order Notifications Missing:** WebSocket broadcasts for order events (creation, status changes) not restored from `routes.old.ts`. Admin dashboard will NOT receive real-time order updates. Impact: Operational visibility gap.
+2. **⚠️ CRITICAL - Transaction Rollback Guards:** Order creation commits stock decrements without transactional guards for downstream failures (WebSocket/audit). Impact: Stock may decrement without user notification if broadcast fails.
+3. **⚠️ HIGH - API Parity Incomplete:** Missing admin/support endpoints from original monolith:
+   - Audit log access endpoints
+   - Support message attachment management (`/api/support/messages/:id/attachments`)
+   - Additional admin statistics from original implementation
+   Impact: Some admin/support features non-functional.
+
+**Recommended Next Steps:**
+1. Add integration tests for critical paths: `/api/orders`, `/api/admin/**`, `/api/support/**`
+2. Restore WebSocket order event broadcasts for admin dashboard
+3. Audit missing endpoints against `routes.old.ts` and restore or document as deprecated
+4. Add transactional notification guards around order completion

@@ -8,8 +8,16 @@ import { calculateCashback, canUseBonuses } from "../bonuses";
 import { orderLimiter } from "../middleware/rateLimiter";
 import { sql, eq } from "drizzle-orm";
 import { z } from "zod";
+import { logger } from "../utils/logger";
+import type { WebSocket } from "ws";
 
-const router = Router();
+interface ConnectedUser {
+  ws: WebSocket;
+  roles: string[];
+}
+
+export function createOrdersRoutes(connectedUsers: Map<string, ConnectedUser>) {
+  const router = Router();
 
 router.get("/", authenticateToken, async (req, res) => {
   const roles = await storage.getUserRoles(req.userId!);
@@ -30,8 +38,9 @@ router.get("/:id", authenticateToken, async (req, res) => {
 });
 
 router.post("/", authenticateToken, orderLimiter, async (req, res) => {
-  const data = createOrderSchema.parse(req.body);
-  const user = await storage.getUser(req.userId!);
+  try {
+    const data = createOrderSchema.parse(req.body);
+    const user = await storage.getUser(req.userId!);
 
   if (!user) {
     return res.status(404).json({ message: "Пользователь не найден" });
@@ -192,7 +201,57 @@ router.post("/", authenticateToken, orderLimiter, async (req, res) => {
     return createdOrder;
   });
 
+  try {
+    for (const [userId, connection] of Array.from(connectedUsers.entries())) {
+      const isStaff = connection.roles.some((role: string) => ['admin', 'consultant'].includes(role));
+      if (isStaff && connection.ws.readyState === 1) {
+        connection.ws.send(JSON.stringify({
+          type: "new_order",
+          order: order,
+        }));
+      }
+    }
+    
+    const customerConnection = connectedUsers.get(req.userId!);
+    if (customerConnection?.ws && customerConnection.ws.readyState === 1) {
+      customerConnection.ws.send(JSON.stringify({
+        type: "order_created",
+        order: order,
+      }));
+    }
+  } catch (broadcastError) {
+    logger.error('Order notification broadcast failed', { error: broadcastError, orderId: order.id });
+  }
+
   res.json(order);
+  } catch (error: any) {
+    if (error instanceof z.ZodError) {
+      return res.status(400).json({ message: error.errors[0].message });
+    }
+    
+    if (error.message?.startsWith('PRODUCT_NOT_FOUND:')) {
+      const productId = error.message.split(':')[1];
+      return res.status(404).json({ message: `Товар ${productId} не найден` });
+    }
+    
+    if (error.message?.startsWith('INSUFFICIENT_STOCK:')) {
+      const [, productName, available, requested] = error.message.split(':');
+      return res.status(400).json({ 
+        message: `Недостаточно товара "${productName}". Доступно: ${available}, запрошено: ${requested}` 
+      });
+    }
+    
+    if (error.message === 'INSUFFICIENT_BONUS') {
+      return res.status(400).json({ message: "Недостаточно бонусов на счёте" });
+    }
+    
+    if (error.message === 'PROMOCODE_ALREADY_USED') {
+      return res.status(400).json({ message: "Вы уже использовали этот промокод" });
+    }
+    
+    logger.error('Order creation error', { error, userId: req.userId });
+    res.status(500).json({ message: "Ошибка создания заказа" });
+  }
 });
 
 router.put("/:id/status", authenticateToken, requireRole("admin"), async (req, res) => {
@@ -222,7 +281,35 @@ router.put("/:id/status", authenticateToken, requireRole("admin"), async (req, r
   }
 
   const order = await storage.updateOrder(req.params.id, updateData);
+  
+  try {
+    for (const [userId, connection] of Array.from(connectedUsers.entries())) {
+      const isStaff = connection.roles.some((role: string) => ['admin', 'consultant'].includes(role));
+      if (isStaff && connection.ws.readyState === 1) {
+        connection.ws.send(JSON.stringify({
+          type: "order_status_updated",
+          order: order,
+        }));
+      }
+    }
+    
+    if (order && order.userId) {
+      const customerConnection = connectedUsers.get(order.userId);
+      if (customerConnection?.ws && customerConnection.ws.readyState === 1) {
+        customerConnection.ws.send(JSON.stringify({
+          type: "order_status_updated",
+          order: order,
+        }));
+      }
+    }
+  } catch (broadcastError) {
+    logger.error('Order status update notification failed', { error: broadcastError, orderId: req.params.id });
+  }
+
   res.json(order);
 });
 
-export default router;
+  return router;
+}
+
+export default createOrdersRoutes;

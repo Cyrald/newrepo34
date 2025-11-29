@@ -17,7 +17,7 @@ import addressesRoutes from "./routes/addresses.routes";
 import paymentCardsRoutes from "./routes/payment-cards.routes";
 import categoriesRoutes from "./routes/categories.routes";
 import promocodesRoutes from "./routes/promocodes.routes";
-import ordersRoutes from "./routes/orders.routes";
+import { createOrdersRoutes } from "./routes/orders.routes";
 import adminRoutes from "./routes/admin.routes";
 import { createSupportRoutes } from "./routes/support.routes";
 
@@ -194,7 +194,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   app.use('/api/payment-cards', paymentCardsRoutes);
   app.use('/api/categories', categoriesRoutes);
   app.use('/api/promocodes', promocodesRoutes);
-  app.use('/api/orders', ordersRoutes);
+  app.use('/api/orders', createOrdersRoutes(connectedUsers));
   app.use('/api/admin', adminRoutes);
   app.use('/api/support', createSupportRoutes(connectedUsers));
 
