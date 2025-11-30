@@ -10,8 +10,18 @@ export function useLogin() {
 
   return useMutation({
     mutationFn: (data: LoginInput) => authApi.login(data),
-    onSuccess: (response) => {
+    onSuccess: async (response) => {
       login(response.user);
+      
+      // Get fresh CSRF token after login
+      try {
+        await fetch('/api/csrf-token-init', { 
+          credentials: 'include' 
+        });
+      } catch (error) {
+        console.error('Failed to fetch CSRF token after login:', error);
+      }
+      
       queryClient.refetchQueries({ queryKey: ["cart"] });
       queryClient.refetchQueries({ queryKey: ["wishlist"] });
     },
@@ -21,6 +31,16 @@ export function useLogin() {
 export function useRegister() {
   return useMutation({
     mutationFn: (data: RegisterInput) => authApi.register(data),
+    onSuccess: async () => {
+      // Get fresh CSRF token after registration
+      try {
+        await fetch('/api/csrf-token-init', { 
+          credentials: 'include' 
+        });
+      } catch (error) {
+        console.error('Failed to fetch CSRF token after registration:', error);
+      }
+    },
   });
 }
 
