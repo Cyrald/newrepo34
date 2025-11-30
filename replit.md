@@ -6,6 +6,39 @@ This is a full-stack e-commerce platform specialized in selling natural and orga
 
 **Security Status:** All critical vulnerabilities from SECURITY_ANALYSIS_REPORT.md have been addressed as of November 30, 2025.
 
+## Session & CSRF Security Fixes (November 30, 2025 - Final)
+
+### Fixed Race Conditions ("Invisible Logout" Issue)
+
+**Problem:** Users experienced authentication state inconsistency - frontend showed authenticated but backend rejected requests with 401/403 errors due to race conditions during session initialization.
+
+**Root Cause:** CSRF token was generated before session was persisted to PostgreSQL, causing token validation failures on subsequent requests.
+
+**Solution - Atomic Session Initialization:**
+1. **Regenerate session** - Creates new session with unique ID
+2. **Set user data** - Adds userId and roles to session object
+3. **Save to database** - Persists session to PostgreSQL
+4. **Verify in database** - Retry logic with exponential backoff ensures session is fully written before CSRF token generation
+5. **Generate CSRF token** - Token is now guaranteed to match persisted session
+
+**Implementation Details:**
+- `verifySessionInDatabase()` now uses 10 retry attempts (not 5) with 100ms initial delay
+- Exponential backoff: 100ms, 200ms, 400ms, 800ms... up to ~51 seconds total
+- `getSessionIdentifier()` throws error instead of generating temporary IDs - prevents invalid CSRF tokens
+- API types updated: login/register responses now include `csrfToken` in TypeScript
+- `useRegister()` hook properly syncs state after registration
+
+**Files Modified:**
+- `server/middleware/csrf.ts` - Error thrown instead of temp ID
+- `server/utils/sessionUtils.ts` - Retry parameters increased (10, 100)
+- `server/routes/auth.routes.ts` - Already sends csrfToken in response
+- `client/src/lib/api.ts` - Response types include csrfToken
+- `client/src/hooks/useAuth.ts` - useRegister properly handles auth state
+- `client/src/providers/auth-provider.tsx` - Checks sessionId cookie before GET /me
+- `client/src/lib/api.ts` - Removed retry logic for 403 errors
+
+**Result:** Session creation is now atomic and verified before CSRF token generation, eliminating race conditions. Users remain authenticated across page reloads.
+
 ## User Preferences
 
 Preferred communication style: Simple, everyday language.
