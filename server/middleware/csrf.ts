@@ -14,16 +14,16 @@ const {
     const sessionId = req.sessionID || req.session?.id;
     
     if (!sessionId) {
-      logger.warn('No session identifier available for CSRF validation', {
+      logger.error('CSRF protection requires active session', {
         hasSession: !!req.session,
         hasSessionID: !!req.sessionID,
         path: req.path,
         method: req.method,
       });
       
-      // Generate unique temporary identifier instead of using 'anonymous'
-      // This prevents all anonymous users from sharing the same CSRF token
-      return `temp-${Date.now()}-${Math.random().toString(36).substring(7)}`;
+      // Выбросить ошибку вместо генерации временного ID
+      // Это предотвратит создание невалидных CSRF токенов
+      throw new Error('Session required for CSRF protection');
     }
     
     return sessionId;

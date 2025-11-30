@@ -63,7 +63,8 @@ export async function initializeSessionWithUser(
     // Step 4: VERIFY session actually exists in database
     // This is critical to prevent race conditions where CSRF token
     // is generated before session is fully persisted to PostgreSQL
-    await verifySessionInDatabase(req.sessionID);
+    // Увеличенные параметры для медленных PostgreSQL окружений
+    await verifySessionInDatabase(req.sessionID, 10, 100);
     
     logger.info('Session initialized and verified in database', { 
       userId, 
@@ -81,11 +82,12 @@ export async function initializeSessionWithUser(
 /**
  * Verify that session exists in the database
  * Uses retry logic with exponential backoff to handle async write delays
+ * Increased defaults for slow database environments (Replit, remote PostgreSQL)
  */
 export async function verifySessionInDatabase(
   sessionId: string,
-  maxAttempts: number = 5,
-  initialDelayMs: number = 50
+  maxAttempts: number = 10,
+  initialDelayMs: number = 100
 ): Promise<void> {
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
@@ -116,7 +118,9 @@ export async function verifySessionInDatabase(
       });
     }
     
-    // Wait before retry with exponential backoff: 50ms, 100ms, 200ms, 400ms, 800ms
+    // Wait before retry with exponential backoff
+    // Default: 100ms, 200ms, 400ms, 800ms, 1600ms, 3200ms, 6400ms, 12800ms, 25600ms
+    // Max total wait: ~51 seconds
     if (attempt < maxAttempts) {
       const delayMs = initialDelayMs * Math.pow(2, attempt - 1);
       await new Promise(resolve => setTimeout(resolve, delayMs));
