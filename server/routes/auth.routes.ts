@@ -4,7 +4,7 @@ import { hashPassword, comparePassword, safePasswordCompare, authenticateToken, 
 import { generateVerificationToken, sendVerificationEmail } from "../email";
 import { registerSchema, loginSchema, updateProfileSchema, changePasswordSchema } from "@shared/schema";
 import { z } from "zod";
-import { authLimiter, registerLimiter, passwordChangeLimiter } from "../middleware/rateLimiter";
+import { authLimiter, registerLimiter, passwordChangeLimiter, refreshTokenLimiter } from "../middleware/rateLimiter";
 import { logLoginAttempt, logRegistration } from "../utils/securityLogger";
 import { logger } from "../utils/logger";
 import { validatePassword } from "../utils/sanitize";
@@ -78,7 +78,7 @@ router.post("/register", registerLimiter, async (req, res) => {
     secure: env.NODE_ENV === 'production',
     sameSite: 'strict',
     maxAge: 7 * 24 * 60 * 60 * 1000,
-    path: '/api/auth/refresh',
+    path: '/api/auth',
   });
   
   logRegistration({
@@ -153,7 +153,7 @@ router.post("/login", authLimiter, async (req, res) => {
     secure: env.NODE_ENV === 'production',
     sameSite: 'strict',
     maxAge: 7 * 24 * 60 * 60 * 1000,
-    path: '/api/auth/refresh',
+    path: '/api/auth',
   });
   
   logLoginAttempt({
@@ -213,7 +213,7 @@ router.post("/logout", authenticateToken, async (req, res) => {
   }
 });
 
-router.post("/refresh", async (req, res) => {
+router.post("/refresh", refreshTokenLimiter, async (req, res) => {
   try {
     const refreshToken = req.cookies.refreshToken;
     
@@ -269,7 +269,7 @@ router.post("/refresh", async (req, res) => {
       secure: env.NODE_ENV === 'production',
       sameSite: 'strict',
       maxAge: 7 * 24 * 60 * 60 * 1000,
-      path: '/api/auth/refresh',
+      path: '/api/auth',
     });
     
     res.json({ success: true });
@@ -448,7 +448,7 @@ router.put("/password", authenticateToken, passwordChangeLimiter, async (req, re
       secure: env.NODE_ENV === 'production',
       sameSite: 'strict',
       maxAge: 7 * 24 * 60 * 60 * 1000,
-      path: '/api/auth/refresh',
+      path: '/api/auth',
     });
     
     res.json({ 
@@ -489,7 +489,7 @@ router.delete("/account", authenticateToken, passwordChangeLimiter, async (req, 
     invalidateUserCache(req.userId!);
 
     res.clearCookie('accessToken', { path: '/' });
-    res.clearCookie('refreshToken', { path: '/api/auth/refresh' });
+    res.clearCookie('refreshToken', { path: '/api/auth' });
     
     logger.info('User account deleted', { 
       userId: req.userId,

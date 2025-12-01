@@ -72,3 +72,12 @@ export const passwordChangeLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
 });
+
+export const refreshTokenLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 100,
+  skipSuccessfulRequests: false,
+  message: 'Слишком много запросов refresh. Попробуйте позже.',
+  standardHeaders: true,
+  legacyHeaders: false,
+});

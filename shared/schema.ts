@@ -320,14 +320,6 @@ export const supportMessages = pgTable("support_messages", {
   createdAtIdx: index("support_messages_created_at_idx").on(table.createdAt),
 }));
 
-export const sessions = pgTable("session", {
-  sid: varchar("sid").primaryKey(),
-  sess: jsonb("sess").notNull(),
-  expire: timestamp("expire").notNull(),
-}, (table) => ({
-  expireIdx: index("session_expire_idx").on(table.expire),
-}));
-
 export const supportMessageAttachments = pgTable("support_message_attachments", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
   messageId: varchar("message_id").notNull().references(() => supportMessages.id, { onDelete: "cascade" }),
