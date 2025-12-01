@@ -1,0 +1,1078 @@
+# План миграции с express-session на JWT
+
+**Статус:** В планировании  
+**Дата создания:** 01.12.2025  
+**Приоритет:** 🔴 Критический  
+**Выбранная стратегия:** B+ (Dual httpOnly Cookies)
+
+---
+
+## 📋 Обзор
+
+Переход с серверных сессий (PostgreSQL) на **Dual httpOnly Cookie JWT стратегию** для решения:
+- ❌ Высокой нагрузки на БД (каждый запрос → session.save())
+- ❌ Сложности управления сессиями (verifySessionInDatabase, sessionRefresh)
+- ❌ CSRF race conditions (токен генерируется до сохранения сессии)
+-⚠️ Проблемы мгновенной блокировки пользователей
+
+**Результат:** Stateless аутентификация с минимальной нагрузкой на БД, полная защита от XSS и CSRF.
+
+---
+
+## 🏗️ Финальная архитектура (B+ Strategy)
+
+### Access Token (JWT) - 15 минут
+```json
+{
+  "userId": "uuid",
+  "roles": ["customer", "admin"],
+  "v": 5,
+  "iat": 1733051234,
+  "exp": 1733052134
+}
+```
+- **Хранение:** httpOnly cookie (path: `/`, XSS protection)
+- **TTL:** 15 минут
+- **Проверка:** Быстрая верификация JWT БЕЗ БД (stateless)
+- **Отправка:** Автоматически браузером на все `/api/*` запросы
+- **Защита:** Полная защита от XSS (httpOnly) и CSRF (SameSite: Strict)
+
+### Refresh Token (JWT) - 7 дней
+```json
+{
+  "userId": "uuid",
+  "jti": "unique-token-id",
+  "iat": 1733051234,
+  "exp": 1733656034
+}
+```
+- **Хранение:** httpOnly cookie (path: `/api/auth/refresh`, XSS protection)
+- **TTL:** 7 дней
+- **Проверка:** JWT + проверка БД (jti в whitelist?)
+- **Отправка:** Только на `/api/auth/refresh` endpoint
+- **Защита:** Полная защита от XSS (httpOnly) и CSRF (SameSite: Strict)
+- **Revocation:** Удаление jti из БД → токен невалиден
+
+### Token Versioning
+Каждый пользователь имеет поле `tokenVersion` в БД. При критических изменениях (бан, смена пароля) версия увеличивается, делая все предыдущие access tokens невалидными.
+
+**Схема:**
+```
+Пользователь в БД: { id: "123", tokenVersion: 5 }
+Access Token: { userId: "123", v: 5 }  ✓ валиден
+После бана: user.tokenVersion = 6
+Access Token: { userId: "123", v: 5 }  ✗ невалиден (v < 6)
+```
+
+---
+
+## 📦 Этап 1: Изменения схемы базы данных
+
+### 1.1 Добавить поле версии в таблицу `users`
+
+**Файл:** `shared/schema.ts`
+
+```typescript
+export const users = pgTable("users", {
+  // ... существующие поля ...
+  tokenVersion: integer("token_version").default(1).notNull(), // ← ДОБАВИТЬ
+  banned: boolean("banned").default(false).notNull(),
+  deletedAt: timestamp("deleted_at"),
+});
+```
+
+### 1.2 Создать таблицу `refreshTokens`
+
+**Файл:** `shared/schema.ts`
+
+```typescript
+export const refreshTokens = pgTable("refresh_tokens", {
+  id: varchar("id").primaryKey().$defaultFn(() => nanoid()),
+  userId: varchar("user_id").notNull().references(() => users.id, { onDelete: 'cascade' }),
+  jti: varchar("jti", { length: 64 }).notNull().unique(), // JWT ID
+  expiresAt: timestamp("expires_at").notNull(),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  userAgent: text("user_agent"), // Для отображения активных сессий
+  ipAddress: text("ip_address"),
+}, (table) => ({
+  userIdIdx: index("refresh_tokens_user_id_idx").on(table.userId),
+  jtiIdx: index("refresh_tokens_jti_idx").on(table.jti),
+  expiresAtIdx: index("refresh_tokens_expires_at_idx").on(table.expiresAt),
+}));
+```
+
+### 1.3 Добавить relations
+
+```typescript
+export const usersRelations = relations(users, ({ many }) => ({
+  // ... существующие relations ...
+  refreshTokens: many(refreshTokens),
+}));
+
+export const refreshTokensRelations = relations(refreshTokens, ({ one }) => ({
+  user: one(users, {
+    fields: [refreshTokens.userId],
+    references: [users.id],
+  }),
+}));
+```
+
+### 1.4 Применить изменения
+
+```bash
+npm run db:push
+```
+
+### 1.5 План удаления sessions таблицы (ПОСЛЕ миграции)
+
+Таблица `sessions` будет удалена после полного перехода на JWT и проверки работоспособности.
+
+---
+
+## 🔧 Этап 2: Создание JWT утилит
+
+### 2.1 Добавить переменные окружения
+
+**Файл:** `server/env.ts`
+
+```typescript
+const envSchema = z.object({
+  // ... существующие поля ...
+  JWT_SECRET: z.string().min(32, 'JWT_SECRET must be at least 32 characters long'),
+  JWT_REFRESH_SECRET: z.string().min(32, 'JWT_REFRESH_SECRET must be at least 32 characters long'),
+});
+```
+
+**Генерация секретов (автоматически в env.ts):**
+```typescript
+if (!process.env.JWT_SECRET) {
+  if (process.env.NODE_ENV === 'production') {
+    console.error('❌ JWT_SECRET обязателен в production');
+    process.exit(1);
+  }
+  const generatedSecret = randomBytes(32).toString('hex');
+  process.env.JWT_SECRET = generatedSecret;
+  console.log('⚠️  JWT_SECRET автоматически сгенерирован для development');
+}
+
+if (!process.env.JWT_REFRESH_SECRET) {
+  if (process.env.NODE_ENV === 'production') {
+    console.error('❌ JWT_REFRESH_SECRET обязателен в production');
+    process.exit(1);
+  }
+  const generatedSecret = randomBytes(32).toString('hex');
+  process.env.JWT_REFRESH_SECRET = generatedSecret;
+  console.log('⚠️  JWT_REFRESH_SECRET автоматически сгенерирован для development');
+}
+```
+
+### 2.2 Создать JWT утилиты
+
+**Новый файл:** `server/utils/jwt.ts`
+
+```typescript
+import jwt from 'jsonwebtoken';
+import { nanoid } from 'nanoid';
+import { env } from '../env';
+
+export interface AccessTokenPayload {
+  userId: string;
+  roles: string[];
+  v: number;  // token version
+  iat: number;
+  exp: number;
+}
+
+export interface RefreshTokenPayload {
+  userId: string;
+  jti: string;
+  iat: number;
+  exp: number;
+}
+
+// Генерация access token
+export function generateAccessToken(
+  userId: string, 
+  roles: string[], 
+  tokenVersion: number
+): string {
+  return jwt.sign(
+    { userId, roles, v: tokenVersion },
+    env.JWT_SECRET,
+    { expiresIn: '15m' }
+  );
+}
+
+// Генерация refresh token
+export function generateRefreshToken(userId: string): { token: string; jti: string } {
+  const jti = nanoid();
+  const token = jwt.sign(
+    { userId, jti },
+    env.JWT_REFRESH_SECRET,
+    { expiresIn: '7d' }
+  );
+  return { token, jti };
+}
+
+// Верификация access token
+export function verifyAccessToken(token: string): AccessTokenPayload {
+  return jwt.verify(token, env.JWT_SECRET) as AccessTokenPayload;
+}
+
+// Верификация refresh token
+export function verifyRefreshToken(token: string): RefreshTokenPayload {
+  return jwt.verify(token, env.JWT_REFRESH_SECRET) as RefreshTokenPayload;
+}
+```
+
+### 2.3 Создать кеш для пользовательского статуса
+
+**Новый файл:** `server/utils/userCache.ts`
+
+```typescript
+import { storage } from '../storage';
+
+interface CachedUserStatus {
+  banned: boolean;
+  deletedAt: Date | null;
+  tokenVersion: number;
+  cachedAt: number;
+}
+
+const userCache = new Map<string, CachedUserStatus>();
+const CACHE_TTL = 10 * 60 * 1000; // 10 минут
+
+export async function getUserStatus(userId: string): Promise<CachedUserStatus> {
+  const cached = userCache.get(userId);
+  const now = Date.now();
+  
+  if (cached && now - cached.cachedAt < CACHE_TTL) {
+    return cached;
+  }
+  
+  const user = await storage.getUser(userId);
+  
+  if (!user) {
+    throw new Error('User not found');
+  }
+  
+  const status: CachedUserStatus = {
+    banned: user.banned || false,
+    deletedAt: user.deletedAt || null,
+    tokenVersion: user.tokenVersion || 1,
+    cachedAt: now
+  };
+  
+  userCache.set(userId, status);
+  return status;
+}
+
+export function invalidateUserCache(userId: string): void {
+  userCache.delete(userId);
+}
+
+export function clearUserCache(): void {
+  userCache.clear();
+}
+```
+
+---
+
+## 🔐 Этап 3: Обновление Storage Layer
+
+### 3.1 Добавить методы для refresh tokens
+
+**Файл:** `server/storage.ts`
+
+```typescript
+// Создать refresh token
+async createRefreshToken(params: {
+  userId: string;
+  jti: string;
+  expiresAt: Date;
+  userAgent?: string;
+  ipAddress?: string;
+}) {
+  return db.insert(refreshTokens).values(params).returning();
+}
+
+// Проверить существование refresh token
+async validateRefreshToken(jti: string): Promise<boolean> {
+  const token = await db.query.refreshTokens.findFirst({
+    where: eq(refreshTokens.jti, jti),
+  });
+  
+  if (!token) return false;
+  if (new Date(token.expiresAt) < new Date()) {
+    await this.deleteRefreshToken(jti);
+    return false;
+  }
+  
+  return true;
+}
+
+// Удалить refresh token (logout)
+async deleteRefreshToken(jti: string) {
+  return db.delete(refreshTokens).where(eq(refreshTokens.jti, jti));
+}
+
+// Удалить все refresh tokens пользователя
+async deleteAllRefreshTokens(userId: string) {
+  return db.delete(refreshTokens).where(eq(refreshTokens.userId, userId));
+}
+
+// Получить все активные refresh tokens пользователя (для UI)
+async getUserRefreshTokens(userId: string) {
+  return db.query.refreshTokens.findMany({
+    where: eq(refreshTokens.userId, userId),
+    orderBy: [desc(refreshTokens.createdAt)],
+  });
+}
+
+// Увеличить версию токена (глобальный logout)
+async incrementTokenVersion(userId: string): Promise<number> {
+  const [updated] = await db.update(users)
+    .set({ tokenVersion: sql`${users.tokenVersion} + 1` })
+    .where(eq(users.id, userId))
+    .returning({ newVersion: users.tokenVersion });
+  return updated.newVersion;
+}
+```
+
+---
+
+## 🛡️ Этап 4: Переписать Authentication Middleware
+
+### 4.1 Обновить auth middleware
+
+**Файл:** `server/auth.ts`
+
+```typescript
+import { type Request, type Response, type NextFunction } from "express";
+import { verifyAccessToken } from "./utils/jwt";
+import { getUserStatus, invalidateUserCache } from "./utils/userCache";
+import { logger } from "./utils/logger";
+
+export async function authenticateToken(
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  try {
+    // Получаем access token из httpOnly cookie
+    const token = req.cookies.accessToken;
+
+    if (!token) {
+      res.status(401).json({ message: 'Требуется аутентификация' });
+      return;
+    }
+
+    // Верифицируем JWT подпись
+    let payload;
+    try {
+      payload = verifyAccessToken(token);
+    } catch (error) {
+      res.status(401).json({ message: 'Невалидный токен' });
+      return;
+    }
+
+    // Получаем статус пользователя из кеша (с версией!)
+    const userStatus = await getUserStatus(payload.userId);
+
+    // КРИТИЧЕСКАЯ ПРОВЕРКА ВЕРСИИ
+    if (payload.v < userStatus.tokenVersion) {
+      logger.warn('Revoked token attempt', {
+        userId: payload.userId,
+        tokenVersion: payload.v,
+        currentVersion: userStatus.tokenVersion
+      });
+      res.status(401).json({ message: 'Токен отозван' });
+      return;
+    }
+
+    // Обычные проверки
+    if (userStatus.deletedAt) {
+      res.status(401).json({ message: 'Аккаунт удален' });
+      return;
+    }
+    
+    if (userStatus.banned) {
+      res.status(401).json({ message: 'Аккаунт заблокирован' });
+      return;
+    }
+
+    // Устанавливаем данные в request
+    req.userId = payload.userId;
+    req.userRoles = payload.roles;
+
+    next();
+  } catch (error) {
+    logger.error('Authentication error', { error });
+    res.status(401).json({ message: 'Ошибка аутентификации' });
+  }
+}
+
+// requireRole остаётся без изменений
+```
+
+---
+
+## 🔄 Этап 5: Переписать Auth Routes
+
+### 5.1 Обновить register
+
+**Файл:** `server/routes/auth.routes.ts`
+
+```typescript
+import { generateAccessToken, generateRefreshToken } from "../utils/jwt";
+import { invalidateUserCache } from "../utils/userCache";
+
+router.post("/register", registerLimiter, async (req, res) => {
+  // ... валидация и создание пользователя ...
+  
+  const roles = await storage.getUserRoles(user.id);
+  const roleNames = roles.map(r => r.role);
+  
+  // Генерируем токены
+  const accessToken = generateAccessToken(user.id, roleNames, 1); // tokenVersion = 1
+  const { token: refreshToken, jti } = generateRefreshToken(user.id);
+  
+  // Сохраняем refresh token в БД
+  const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+  await storage.createRefreshToken({
+    userId: user.id,
+    jti,
+    expiresAt,
+    userAgent: req.get('user-agent'),
+    ipAddress: req.ip,
+  });
+  
+  // Устанавливаем httpOnly cookies
+  res.cookie('accessToken', accessToken, {
+    httpOnly: true,
+    secure: env.NODE_ENV === 'production',
+    sameSite: 'strict',
+    maxAge: 15 * 60 * 1000, // 15 минут
+    path: '/',
+  });
+  
+  res.cookie('refreshToken', refreshToken, {
+    httpOnly: true,
+    secure: env.NODE_ENV === 'production',
+    sameSite: 'strict',
+    maxAge: 7 * 24 * 60 * 60 * 1000, // 7 дней
+    path: '/api/auth/refresh', // ← КРИТИЧНО! Только на refresh endpoint
+  });
+  
+  logRegistration({
+    email: user.email,
+    userId: user.id,
+    ip: req.ip,
+    userAgent: req.get('user-agent'),
+  });
+
+  // Возвращаем только user data (токены в cookies!)
+  res.json({
+    user: {
+      id: user.id,
+      email: user.email,
+      firstName: user.firstName,
+      lastName: user.lastName,
+      phone: user.phone,
+      isVerified: user.isVerified,
+      bonusBalance: user.bonusBalance,
+      roles: roleNames,
+    },
+  });
+});
+```
+
+### 5.2 Обновить login (аналогично register)
+
+### 5.3 Создать refresh endpoint
+
+```typescript
+router.post("/refresh", async (req, res) => {
+  try {
+    // Refresh token автоматически в cookie
+    const refreshToken = req.cookies.refreshToken;
+    
+    if (!refreshToken) {
+      return res.status(401).json({ message: 'Refresh token отсутствует' });
+    }
+    
+    // Верификация refresh token
+    let payload;
+    try {
+      payload = verifyRefreshToken(refreshToken);
+    } catch (error) {
+      return res.status(401).json({ message: 'Невалидный refresh token' });
+    }
+    
+    // Проверка в БД
+    const isValid = await storage.validateRefreshToken(payload.jti);
+    if (!isValid) {
+      return res.status(401).json({ message: 'Refresh token отозван' });
+    }
+    
+    // Получаем актуальную версию пользователя и роли
+    const user = await storage.getUser(payload.userId);
+    if (!user) {
+      return res.status(401).json({ message: 'Пользователь не найден' });
+    }
+    
+    const userRoles = await storage.getUserRoles(user.id);
+    const roles = userRoles.map(r => r.role);
+    
+    // Генерируем новый access token с текущей версией
+    const newAccessToken = generateAccessToken(user.id, roles, user.tokenVersion);
+    
+    // REFRESH TOKEN ROTATION (опционально, но рекомендуется)
+    const { token: newRefreshToken, jti: newJti } = generateRefreshToken(user.id);
+    
+    // Удаляем старый refresh token
+    await storage.deleteRefreshToken(payload.jti);
+    
+    // Сохраняем новый refresh token
+    const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+    await storage.createRefreshToken({
+      userId: user.id,
+      jti: newJti,
+      expiresAt,
+      userAgent: req.get('user-agent'),
+      ipAddress: req.ip,
+    });
+    
+    // Устанавливаем новые cookies
+    res.cookie('accessToken', newAccessToken, {
+      httpOnly: true,
+      secure: env.NODE_ENV === 'production',
+      sameSite: 'strict',
+      maxAge: 15 * 60 * 1000,
+      path: '/',
+    });
+    
+    res.cookie('refreshToken', newRefreshToken, {
+      httpOnly: true,
+      secure: env.NODE_ENV === 'production',
+      sameSite: 'strict',
+      maxAge: 7 * 24 * 60 * 60 * 1000,
+      path: '/api/auth/refresh',
+    });
+    
+    res.json({ success: true });
+  } catch (error) {
+    logger.error('Token refresh error', { error });
+    res.status(500).json({ message: 'Ошибка обновления токена' });
+  }
+});
+```
+
+### 5.4 Обновить logout
+
+```typescript
+router.post("/logout", authenticateToken, async (req, res) => {
+  try {
+    // Удаляем refresh token из БД
+    const refreshToken = req.cookies.refreshToken;
+    if (refreshToken) {
+      try {
+        const payload = verifyRefreshToken(refreshToken);
+        await storage.deleteRefreshToken(payload.jti);
+      } catch (error) {
+        // Ignore invalid token
+      }
+    }
+    
+    // Очищаем cookies
+    res.clearCookie('accessToken', { path: '/' });
+    res.clearCookie('refreshToken', { path: '/api/auth/refresh' });
+    
+    res.json({ message: 'Выход выполнен' });
+  } catch (error) {
+    logger.error('Logout error', { error });
+    res.status(500).json({ message: 'Ошибка выхода' });
+  }
+});
+```
+
+### 5.5 Создать /me endpoint для проверки статуса
+
+```typescript
+router.get("/me", authenticateToken, async (req, res) => {
+  const user = await storage.getUser(req.userId!);
+  
+  if (!user) {
+    return res.status(404).json({ message: "Пользователь не найден" });
+  }
+
+  const roles = await storage.getUserRoles(user.id);
+  const roleNames = roles.map(r => r.role);
+
+  res.json({
+    user: {
+      id: user.id,
+      email: user.email,
+      firstName: user.firstName,
+      lastName: user.lastName,
+      patronymic: user.patronymic,
+      phone: user.phone,
+      isVerified: user.isVerified,
+      bonusBalance: user.bonusBalance,
+      roles: roleNames,
+    },
+  });
+});
+```
+
+### 5.6 Обновить change password (глобальный logout)
+
+```typescript
+router.put("/password", authenticateToken, passwordChangeLimiter, async (req, res) => {
+  // ... проверка пароля ...
+  
+  // Обновляем пароль
+  await storage.updateUser(req.userId!, {
+    passwordHash: newPasswordHash,
+  });
+  
+  // УВЕЛИЧИВАЕМ ВЕРСИЮ ТОКЕНА - ГЛОБАЛЬНЫЙ LOGOUT
+  const newVersion = await storage.incrementTokenVersion(req.userId!);
+  
+  // Удаляем ВСЕ refresh tokens
+  await storage.deleteAllRefreshTokens(req.userId!);
+  
+  // Инвалидируем кеш
+  invalidateUserCache(req.userId!);
+  
+  // Генерируем новые токены для текущего устройства
+  const user = await storage.getUser(req.userId!);
+  const userRoles = await storage.getUserRoles(req.userId!);
+  const roles = userRoles.map(r => r.role);
+  
+  const accessToken = generateAccessToken(req.userId!, roles, newVersion);
+  const { token: refreshToken, jti } = generateRefreshToken(req.userId!);
+  
+  // Сохраняем новый refresh token
+  const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+  await storage.createRefreshToken({
+    userId: req.userId!,
+    jti,
+    expiresAt,
+    userAgent: req.get('user-agent'),
+    ipAddress: req.ip,
+  });
+  
+  // Устанавливаем новые cookies
+  res.cookie('accessToken', accessToken, {
+    httpOnly: true,
+    secure: env.NODE_ENV === 'production',
+    sameSite: 'strict',
+    maxAge: 15 * 60 * 1000,
+    path: '/',
+  });
+  
+  res.cookie('refreshToken', refreshToken, {
+    httpOnly: true,
+    secure: env.NODE_ENV === 'production',
+    sameSite: 'strict',
+    maxAge: 7 * 24 * 60 * 60 * 1000,
+    path: '/api/auth/refresh',
+  });
+  
+  res.json({ 
+    message: 'Пароль успешно изменён. Все устройства отключены, вы вошли заново на этом устройстве.' 
+  });
+});
+```
+
+---
+
+## 🗑️ Этап 6: Удаление Session и CSRF Middleware
+
+### 6.1 Обновить server/index.ts
+
+**УДАЛИТЬ:**
+```typescript
+import { sessionMiddleware } from "./session";
+import { sessionRefreshMiddleware } from "./middleware/sessionRefresh";
+import { csrfMiddleware, csrfTokenEndpoint } from "./middleware/csrf";
+
+app.use(sessionMiddleware);
+app.use(sessionRefreshMiddleware);
+app.use('/api', csrfMiddleware);
+app.get('/api/csrf-token-init', authenticateToken, csrfTokenEndpoint);
+```
+
+**ДОБАВИТЬ:**
+```typescript
+import cookieParser from "cookie-parser";
+
+app.use(cookieParser()); // ← Для чтения cookies
+```
+
+### 6.2 Обновить CORS
+
+```typescript
+app.use(corsMiddleware); // уже настроен с credentials: true
+```
+
+Убедиться что в `server/middleware/cors.ts`:
+```typescript
+credentials: true,  // ← Должно быть true для httpOnly cookies
+```
+
+### 6.3 Удалить файлы
+
+После полного перехода и тестирования:
+- `server/session.ts`
+- `server/utils/sessionUtils.ts`
+- `server/utils/sessionManager.ts`
+- `server/middleware/sessionRefresh.ts`
+- `server/middleware/csrf.ts`
+
+### 6.4 Удалить зависимости (package.json)
+
+После миграции:
+```bash
+npm uninstall express-session connect-pg-simple csrf-csrf memorystore
+```
+
+---
+
+## 🎨 Этап 7: Обновление Frontend
+
+### 7.1 Обновить Auth Store
+
+**Файл:** `client/src/stores/authStore.ts`
+
+```typescript
+// Убрать всё, что связано с CSRF токенами
+// Токены теперь в httpOnly cookies, фронтенд их не видит
+
+interface AuthState {
+  user: User | null;
+  loading: boolean;
+  setUser: (user: User | null) => void;
+  setLoading: (loading: boolean) => void;
+  clearAuth: () => void;
+}
+
+export const useAuthStore = create<AuthState>((set) => ({
+  user: null,
+  loading: true,
+  
+  setUser: (user) => set({ user }),
+  setLoading: (loading) => set({ loading }),
+  
+  clearAuth: () => set({ user: null, loading: false }),
+}));
+```
+
+### 7.2 Обновить API Client
+
+**Файл:** `client/src/lib/api.ts`
+
+```typescript
+import axios from 'axios';
+import { useAuthStore } from '../stores/authStore';
+
+export const api = axios.create({
+  baseURL: '/api',
+  withCredentials: true, // ← КРИТИЧНО! Отправляет httpOnly cookies
+});
+
+// Убрать interceptor для CSRF токенов
+
+// Обновить response interceptor для auto-refresh
+api.interceptors.response.use(
+  (response) => response,
+  async (error) => {
+    const originalRequest = error.config;
+
+    // Если 401 и не retry
+    if (error.response?.status === 401 && !originalRequest._retry) {
+      originalRequest._retry = true;
+
+      try {
+        // Refresh token автоматически отправляется в cookie
+        await axios.post('/api/auth/refresh', {}, {
+          withCredentials: true
+        });
+
+        // Повторить оригинальный запрос
+        return api(originalRequest);
+      } catch (refreshError) {
+        // Refresh failed - полный logout
+        useAuthStore.getState().clearAuth();
+        window.location.href = '/login';
+        return Promise.reject(refreshError);
+      }
+    }
+
+    return Promise.reject(error);
+  }
+);
+```
+
+### 7.3 Обновить Auth Provider
+
+**Файл:** `client/src/providers/auth-provider.tsx`
+
+```typescript
+import { useEffect } from 'react';
+import { useAuthStore } from '../stores/authStore';
+import { api } from '../lib/api';
+
+export function AuthProvider({ children }: { children: React.ReactNode }) {
+  const { setUser, setLoading } = useAuthStore();
+
+  useEffect(() => {
+    // Проверяем auth статус при загрузке
+    const checkAuth = async () => {
+      try {
+        // Cookie отправляется автоматически
+        const response = await api.get('/auth/me');
+        setUser(response.data.user);
+      } catch (error) {
+        setUser(null);
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    checkAuth();
+  }, [setUser, setLoading]);
+
+  return <>{children}</>;
+}
+```
+
+### 7.4 Обновить Login/Register компоненты
+
+Убрать все упоминания CSRF токенов:
+
+```typescript
+// Login
+const handleLogin = async (data: LoginFormData) => {
+  const response = await api.post('/auth/login', data);
+  // Токены уже в httpOnly cookies!
+  setUser(response.data.user);
+  navigate('/');
+};
+
+// Register (аналогично)
+```
+
+### 7.5 Обновить Logout
+
+```typescript
+const handleLogout = async () => {
+  await api.post('/auth/logout');
+  // Cookies очищены на сервере
+  clearAuth();
+  navigate('/login');
+};
+```
+
+---
+
+## 🔌 Этап 8: Обновление WebSocket Authentication
+
+### 8.1 Обновить WebSocket handler
+
+**Файл:** `server/routes.ts`
+
+```typescript
+// Вариант 1: Первое сообщение с user ID
+wss.on('connection', async (ws, req) => {
+  let authenticated = false;
+  let userId: string | null = null;
+
+  ws.on('message', async (data) => {
+    const message = JSON.parse(data.toString());
+
+    if (!authenticated && message.type === 'auth') {
+      // Проверяем cookie из handshake
+      const cookies = parseCookies(req.headers.cookie || '');
+      const accessToken = cookies.accessToken;
+
+      if (!accessToken) {
+        ws.close(1008, 'Unauthorized');
+        return;
+      }
+
+      try {
+        const payload = verifyAccessToken(accessToken);
+        const userStatus = await getUserStatus(payload.userId);
+
+        if (payload.v < userStatus.tokenVersion || userStatus.banned || userStatus.deletedAt) {
+          ws.close(1008, 'Unauthorized');
+          return;
+        }
+
+        authenticated = true;
+        userId = payload.userId;
+        
+        // Добавляем в активные connections
+        // ...
+      } catch (error) {
+        ws.close(1008, 'Unauthorized');
+        return;
+      }
+    }
+
+    if (!authenticated) {
+      ws.close(1008, 'Not authenticated');
+      return;
+    }
+
+    // Обработка остальных сообщений
+    // ...
+  });
+});
+```
+
+### 8.2 Обновить Frontend WebSocket
+
+**Файл:** `client/src/lib/websocket.ts`
+
+```typescript
+// Просто подключаемся, cookie отправляется автоматически
+const ws = new WebSocket(`${wsProtocol}//${window.location.host}`);
+
+ws.onopen = () => {
+  // Отправляем auth сообщение
+  ws.send(JSON.stringify({ type: 'auth' }));
+};
+```
+
+---
+
+## 🧪 Этап 9: Тестирование
+
+### 9.1 Функциональное тестирование
+
+**Чек-лист:**
+- [ ] Регистрация создаёт оба cookie (accessToken, refreshToken)
+- [ ] Login создаёт оба cookie
+- [ ] Protected routes работают с access token
+- [ ] Refresh работает автоматически при истечении access token
+- [ ] Logout очищает оба cookie и удаляет refresh token из БД
+- [ ] Смена пароля увеличивает tokenVersion и очищает все refresh tokens
+- [ ] Бан пользователя инвалидирует токены через версионность
+- [ ] WebSocket аутентификация работает
+- [ ] Page refresh сохраняет авторизацию (через /auth/me)
+
+### 9.2 Безопасность
+
+**Проверка:**
+- [ ] httpOnly cookies не читаются через JavaScript (console: `document.cookie`)
+- [ ] SameSite: Strict блокирует cross-site запросы
+- [ ] Refresh token отправляется только на `/api/auth/refresh`
+- [ ] Access token имеет TTL 15 минут
+- [ ] Refresh token имеет TTL 7 дней
+- [ ] Token versioning работает (бан → все токены невалидны)
+
+### 9.3 Производительность
+
+**Метрики:**
+- [ ] Запросы к БД снижены на 95% (только refresh раз в 15 мин)
+- [ ] User cache работает (10 мин TTL)
+- [ ] Access token проверка без БД (stateless)
+
+---
+
+## 🚀 Этап 10: Миграция Production
+
+### 10.1 Стратегия миграции
+
+**Hard Cutoff (рекомендуется для простоты):**
+
+1. Уведомить пользователей за 24 часа
+2. Применить миграцию БД (добавить tokenVersion, refreshTokens)
+3. Деплой нового кода
+4. Все пользователи logout → нужно войти заново
+5. Удалить таблицу sessions через 7 дней
+
+### 10.2 Environment Variables Production
+
+```bash
+# Добавить в production environment:
+JWT_SECRET=<сгенерировать через openssl rand -hex 32>
+JWT_REFRESH_SECRET=<сгенерировать через openssl rand -hex 32>
+```
+
+### 10.3 Rollback Plan
+
+Если что-то пойдёт не так:
+
+1. Вернуть предыдущую версию кода (с sessions)
+2. Пользователи потеряют refresh tokens, но сессии восстановятся
+3. tokenVersion и refreshTokens таблица не мешают старому коду
+
+---
+
+## 📋 Итоговый Checklist
+
+### База данных
+- [ ] Добавлено поле `tokenVersion` в таблицу `users`
+- [ ] Создана таблица `refreshTokens` с индексами
+- [ ] Добавлены relations
+- [ ] Выполнен `npm run db:push`
+
+### Backend
+- [ ] Добавлены JWT_SECRET и JWT_REFRESH_SECRET в env
+- [ ] Создан `server/utils/jwt.ts`
+- [ ] Создан `server/utils/userCache.ts`
+- [ ] Обновлён `server/storage.ts` (методы для refresh tokens)
+- [ ] Переписан `server/auth.ts` (authenticateToken)
+- [ ] Переписаны auth routes (login, register, refresh, logout, /me)
+- [ ] Удалены session/CSRF middleware из index.ts
+- [ ] Добавлен cookie-parser
+- [ ] Обновлена WebSocket аутентификация
+
+### Frontend
+- [ ] Обновлён auth store (убран CSRF)
+- [ ] Обновлён API client (withCredentials, auto-refresh)
+- [ ] Обновлён Auth Provider (проверка через /me)
+- [ ] Обновлены Login/Register компоненты
+- [ ] Обновлён WebSocket client
+
+### Cleanup (после тестирования)
+- [ ] Удалены файлы session/CSRF
+- [ ] Удалены зависимости из package.json
+- [ ] Удалена таблица sessions из БД
+
+### Тестирование
+- [ ] Все функциональные тесты пройдены
+- [ ] Проверена безопасность (XSS, CSRF)
+- [ ] Проверена производительность
+
+### Production
+- [ ] Добавлены production secrets
+- [ ] Выполнена миграция БД
+- [ ] Деплой выполнен
+- [ ] Мониторинг работает
+
+---
+
+## 📊 Ожидаемые результаты
+
+**До миграции:**
+- 🔴 1000+ запросов/сек к БД (session.save())
+- 🔴 Race conditions с CSRF токенами
+- 🔴 Сложная логика session refresh
+- ⚠️ Блокировка юзера через 14 дней (TTL сессии)
+
+**После миграции:**
+- ✅ 1-5 запросов/сек к БД (только refresh)
+- ✅ Нет race conditions (stateless access token)
+- ✅ Простая логика (JWT verify)
+- ✅ Блокировка юзера через <10 минут (token versioning + cache TTL)
+- ✅ Полная защита от XSS (httpOnly cookies)
+- ✅ Полная защита от CSRF (SameSite: Strict)
+
+---
+
+**Конец плана миграции**
