@@ -1,51 +1,63 @@
 import cors from 'cors';
 import { logger } from '../utils/logger';
+import { env } from '../env';
 
-const isProduction = process.env.NODE_ENV === 'production';
+/**
+ * Гибридная CORS стратегия:
+ * - Production: Белый список доменов из env переменной ALLOWED_ORIGINS
+ * - Development: Разреши любой текущий хост (для удобства разработки)
+ * 
+ * Это решает конфликт: Access-Control-Allow-Origin: * + credentials: true
+ * Браузер блокирует cookies при такой комбинации. Решение: всегда использовать конкретный origin!
+ */
 
 export const corsMiddleware = cors({
-  origin: isProduction
-    ? (origin, callback) => {
-        const allowedOrigins = [
-          process.env.FRONTEND_URL,
-          process.env.REPLIT_DEV_DOMAIN
-        ].filter(Boolean);
-        
-        if (!origin) {
-          // No Origin header means same-origin request - allow it
-          // This is normal for server-to-server requests and some browser scenarios
-          callback(null, true);
-          return;
-        }
-        
-        try {
-          const requestOrigin = new URL(origin);
-          
-          const isAllowed = allowedOrigins.some(allowed => {
-            if (!allowed) return false;
-            try {
-              const allowedOrigin = new URL(allowed);
-              return requestOrigin.origin === allowedOrigin.origin;
-            } catch {
-              return false;
-            }
-          });
-          
-          if (isAllowed) {
-            callback(null, true);
-          } else {
-            logger.warn('CORS blocked request', { 
-              origin,
-              allowedOrigins
-            });
-            callback(null, false);
-          }
-        } catch (error) {
-          logger.error('Invalid Origin header', { origin });
-          callback(null, false);
-        }
+  origin: (origin, callback) => {
+    // 🔒 PRODUCTION MODE: Строгая валидация
+    if (env.NODE_ENV === 'production') {
+      const allowedOriginsEnv = process.env.ALLOWED_ORIGINS;
+      
+      if (!allowedOriginsEnv) {
+        logger.error('CORS: ALLOWED_ORIGINS not configured in production!');
+        callback(new Error('CORS not allowed - ALLOWED_ORIGINS not configured'));
+        return;
       }
-    : true,
+      
+      const allowedList = allowedOriginsEnv.split(',').map(d => d.trim());
+      
+      // Проверяем что origin в whitelist
+      const isAllowed = allowedList.some(allowed => {
+        return origin === allowed || origin === `https://${allowed}` || origin === `http://${allowed}`;
+      });
+      
+      if (isAllowed) {
+        logger.info('CORS allowed origin', { origin });
+        callback(null, true);
+      } else {
+        logger.warn('CORS blocked - origin not in whitelist', {
+          origin,
+          allowedList,
+        });
+        callback(new Error('CORS not allowed'));
+      }
+      return;
+    }
+    
+    // 🚀 DEVELOPMENT MODE: Удобство разработки
+    // ⚠️  ВНИМАНИЕ: Этот режим НАМЕРЕННО НЕ ЗАЩИЩЕН для удобства!
+    // На development мы разрешаем любой origin потому что:
+    // 1. Много разных dev доменов (localhost:5000, Replit, Docker, etc)
+    // 2. Это локальная разработка, нет реальных атак
+    // 3. NODE_ENV=production на VPS будет использовать строгую валидацию
+    if (env.NODE_ENV === 'development') {
+      logger.debug('CORS development mode - allowing all origins', { origin });
+      callback(null, true);
+      return;
+    }
+    
+    // Fallback: отклонить
+    callback(new Error('CORS not allowed'));
+  },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'idempotency-key'],
