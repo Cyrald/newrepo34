@@ -9,6 +9,16 @@ import { Badge } from "@/components/ui/badge"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Separator } from "@/components/ui/separator"
 import { Input } from "@/components/ui/input"
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog"
 import { PageLoadingSkeleton } from "@/components/loading-state"
 import { ProductCard } from "@/components/product-card"
 import { useProduct } from "@/hooks/useProducts"
@@ -21,6 +31,12 @@ export default function ProductDetailPage() {
   const [, params] = useRoute("/products/:id")
   const productId = params?.id || ""
   const [location, setLocation] = useLocation()
+  
+  const [authDialogOpen, setAuthDialogOpen] = useState(false)
+  const [authDialogConfig, setAuthDialogConfig] = useState<{
+    description: string
+    onConfirm: () => void
+  }>({ description: "", onConfirm: () => {} })
   
   const { toast } = useToast()
   const isAuthenticated = useAuthStore((state) => state.isAuthenticated)
@@ -63,6 +79,18 @@ export default function ProductDetailPage() {
   const handleAddToCart = async () => {
     if (!product) return
     
+    if (!isAuthenticated) {
+      setAuthDialogConfig({
+        description: "Для добавления товара в корзину требуется авторизация. Войти?",
+        onConfirm: () => {
+          setAuthDialogOpen(false)
+          setLocation(`/login?returnUrl=${encodeURIComponent(location)}`)
+        }
+      })
+      setAuthDialogOpen(true)
+      return
+    }
+    
     const qty = typeof quantity === "number" ? quantity : 1
     
     try {
@@ -81,7 +109,14 @@ export default function ProductDetailPage() {
 
   const handleToggleWishlist = async () => {
     if (!isAuthenticated) {
-      setLocation(`/login?returnUrl=${location}`)
+      setAuthDialogConfig({
+        description: "Для добавления в избранное требуется авторизация. Войти?",
+        onConfirm: () => {
+          setAuthDialogOpen(false)
+          setLocation(`/login?returnUrl=${encodeURIComponent(location)}`)
+        }
+      })
+      setAuthDialogOpen(true)
       return
     }
     
@@ -420,6 +455,24 @@ export default function ProductDetailPage() {
           )}
         </div>
       </main>
+
+      {/* Auth Dialog */}
+      <AlertDialog open={authDialogOpen} onOpenChange={setAuthDialogOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Требуется авторизация</AlertDialogTitle>
+            <AlertDialogDescription>
+              {authDialogConfig.description}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Отмена</AlertDialogCancel>
+            <AlertDialogAction onClick={authDialogConfig.onConfirm}>
+              Войти
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       <Footer />
     </div>

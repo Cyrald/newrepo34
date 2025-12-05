@@ -22,6 +22,16 @@ import {
   SheetTitle,
   SheetTrigger,
 } from "@/components/ui/sheet"
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog"
 import { Checkbox } from "@/components/ui/checkbox"
 import { Label } from "@/components/ui/label"
 import { Slider } from "@/components/ui/slider"
@@ -40,6 +50,12 @@ export default function CatalogPage() {
   const searchParams = useSearch()
   const urlParams = new URLSearchParams(searchParams)
   const isAuthenticated = useAuthStore((state) => state.isAuthenticated)
+  
+  const [authDialogOpen, setAuthDialogOpen] = useState(false)
+  const [authDialogConfig, setAuthDialogConfig] = useState<{
+    description: string
+    onConfirm: () => void
+  }>({ description: "", onConfirm: () => {} })
   
   const [sortBy, setSortBy] = useState<"price_asc" | "price_desc" | "popularity" | "newest" | "rating">(
     (urlParams.get("sort") as any) || "newest"
@@ -144,7 +160,14 @@ export default function CatalogPage() {
 
   const handleAddToCart = async (productId: string) => {
     if (!isAuthenticated) {
-      toast({ title: "Требуется авторизация", description: "Войдите для добавления товаров в корзину", variant: "destructive" })
+      setAuthDialogConfig({
+        description: "Для добавления товара в корзину требуется авторизация. Войти?",
+        onConfirm: () => {
+          setAuthDialogOpen(false)
+          setLocation(`/login?returnUrl=${encodeURIComponent(location)}`)
+        }
+      })
+      setAuthDialogOpen(true)
       return
     }
     addToCart.mutate({ productId, quantity: 1 }, {
@@ -154,9 +177,15 @@ export default function CatalogPage() {
   }
 
   const handleToggleWishlist = async (productId: string) => {
-    // Require authentication for wishlist
     if (!isAuthenticated) {
-      setLocation(`/login?returnUrl=${location}`)
+      setAuthDialogConfig({
+        description: "Для добавления в избранное требуется авторизация. Войти?",
+        onConfirm: () => {
+          setAuthDialogOpen(false)
+          setLocation(`/login?returnUrl=${encodeURIComponent(location)}`)
+        }
+      })
+      setAuthDialogOpen(true)
       return
     }
     
@@ -346,7 +375,7 @@ export default function CatalogPage() {
                         key={product.id} 
                         product={product}
                         onAddToCart={handleAddToCart}
-                        onToggleWishlist={isAuthenticated ? handleToggleWishlist : undefined}
+                        onToggleWishlist={handleToggleWishlist}
                         isInWishlist={wishlistProductIds.has(product.id)}
                       />
                     ))}
@@ -411,6 +440,24 @@ export default function CatalogPage() {
           </div>
         </div>
       </main>
+
+      {/* Auth Dialog */}
+      <AlertDialog open={authDialogOpen} onOpenChange={setAuthDialogOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Требуется авторизация</AlertDialogTitle>
+            <AlertDialogDescription>
+              {authDialogConfig.description}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Отмена</AlertDialogCancel>
+            <AlertDialogAction onClick={authDialogConfig.onConfirm}>
+              Войти
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       <Footer />
     </div>

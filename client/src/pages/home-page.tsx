@@ -1,7 +1,18 @@
-import { Link } from "wouter"
+import { useState } from "react"
+import { Link, useLocation } from "wouter"
 import { ShoppingBag, Leaf, Award, Truck } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent } from "@/components/ui/card"
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog"
 import { Header } from "@/components/header"
 import { Footer } from "@/components/footer"
 import heroImage from "@assets/generated_images/Hero_section_background_image_b0dcdc6c.png"
@@ -21,6 +32,12 @@ import { useToast } from "@/hooks/use-toast"
 
 export default function HomePage() {
   usePrefetchRoutes()
+  const [, setLocation] = useLocation()
+  const [authDialogOpen, setAuthDialogOpen] = useState(false)
+  const [authDialogConfig, setAuthDialogConfig] = useState<{
+    description: string
+    onConfirm: () => void
+  }>({ description: "", onConfirm: () => {} })
   
   const { data: categories, isLoading: categoriesLoading } = useCategories()
   const { data: newProductsData, isLoading: productsLoading } = useProducts({
@@ -48,7 +65,14 @@ export default function HomePage() {
 
   const handleAddToCart = async (productId: string) => {
     if (!isAuthenticated) {
-      toast({ title: "Требуется авторизация", description: "Войдите для добавления товаров в корзину", variant: "destructive" })
+      setAuthDialogConfig({
+        description: "Для добавления товара в корзину требуется авторизация. Войти?",
+        onConfirm: () => {
+          setAuthDialogOpen(false)
+          setLocation(`/login?returnUrl=${encodeURIComponent(window.location.pathname)}`)
+        }
+      })
+      setAuthDialogOpen(true)
       return
     }
     addToCart.mutate({ productId, quantity: 1 }, {
@@ -58,6 +82,18 @@ export default function HomePage() {
   }
 
   const handleToggleWishlist = async (productId: string) => {
+    if (!isAuthenticated) {
+      setAuthDialogConfig({
+        description: "Для добавления в избранное требуется авторизация. Войти?",
+        onConfirm: () => {
+          setAuthDialogOpen(false)
+          setLocation(`/login?returnUrl=${encodeURIComponent(window.location.pathname)}`)
+        }
+      })
+      setAuthDialogOpen(true)
+      return
+    }
+    
     const isInWishlist = wishlistProductIds.has(productId)
     if (isInWishlist) {
       removeFromWishlist.mutate(productId, {
@@ -143,7 +179,7 @@ export default function HomePage() {
                     key={product.id} 
                     product={product}
                     onAddToCart={handleAddToCart}
-                    onToggleWishlist={isAuthenticated ? handleToggleWishlist : undefined}
+                    onToggleWishlist={handleToggleWishlist}
                     isInWishlist={wishlistProductIds.has(product.id)}
                   />
                 ))}
@@ -247,6 +283,24 @@ export default function HomePage() {
           </div>
         </section>
       </main>
+
+      {/* Auth Dialog */}
+      <AlertDialog open={authDialogOpen} onOpenChange={setAuthDialogOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Требуется авторизация</AlertDialogTitle>
+            <AlertDialogDescription>
+              {authDialogConfig.description}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Отмена</AlertDialogCancel>
+            <AlertDialogAction onClick={authDialogConfig.onConfirm}>
+              Войти
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       <Footer />
     </div>

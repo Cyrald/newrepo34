@@ -10,13 +10,29 @@ import {
   SheetContent,
   SheetTrigger,
 } from "@/components/ui/sheet"
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog"
 import { useAuthStore } from "@/stores/authStore"
 import { useCartStore } from "@/stores/cartStore"
 
 export function Header() {
-  const [location] = useLocation()
+  const [, setLocation] = useLocation()
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
   const [searchQuery, setSearchQuery] = useState("")
+  const [authDialogOpen, setAuthDialogOpen] = useState(false)
+  const [authDialogConfig, setAuthDialogConfig] = useState<{
+    title: string
+    description: string
+    returnUrl: string
+  }>({ title: "", description: "", returnUrl: "" })
 
   const isAuthenticated = useAuthStore((state) => state.isAuthenticated)
   const user = useAuthStore((state) => state.user)
@@ -33,6 +49,25 @@ export function Header() {
     if (searchQuery.trim()) {
       window.location.href = `/catalog?search=${encodeURIComponent(searchQuery)}`
     }
+  }
+
+  const handleProtectedNavigation = (e: React.MouseEvent, targetUrl: string, feature: string) => {
+    e.preventDefault()
+    if (!isAuthenticated) {
+      setAuthDialogConfig({
+        title: "Требуется авторизация",
+        description: `Для ${feature} требуется авторизация. Войти?`,
+        returnUrl: targetUrl
+      })
+      setAuthDialogOpen(true)
+    } else {
+      setLocation(targetUrl)
+    }
+  }
+
+  const handleAuthConfirm = () => {
+    setAuthDialogOpen(false)
+    setLocation(`/login?returnUrl=${encodeURIComponent(authDialogConfig.returnUrl)}`)
   }
 
   return (
@@ -71,44 +106,40 @@ export function Header() {
           <Button
             variant="ghost"
             size="icon"
-            asChild
+            onClick={(e) => handleProtectedNavigation(e, "/wishlist", "просмотра избранного")}
             data-testid="link-wishlist"
           >
-            <Link href="/wishlist">
-              <div className="relative">
-                <Heart className="h-5 w-5" />
-                {wishlistItemsCount > 0 && (
-                  <Badge
-                    variant="destructive"
-                    className="absolute -right-2 -top-2 h-5 min-w-5 px-1 text-xs"
-                    data-testid="badge-wishlist-count"
-                  >
-                    {wishlistItemsCount}
-                  </Badge>
-                )}
-              </div>
-            </Link>
+            <div className="relative">
+              <Heart className="h-5 w-5" />
+              {wishlistItemsCount > 0 && (
+                <Badge
+                  variant="destructive"
+                  className="absolute -right-2 -top-2 h-5 min-w-5 px-1 text-xs"
+                  data-testid="badge-wishlist-count"
+                >
+                  {wishlistItemsCount}
+                </Badge>
+              )}
+            </div>
           </Button>
 
           <Button
             variant="ghost"
             size="icon"
-            asChild
+            onClick={(e) => handleProtectedNavigation(e, "/cart", "просмотра корзины")}
             data-testid="link-cart"
           >
-            <Link href="/cart">
-              <span className="relative inline-flex w-5 h-5">
-                <ShoppingCart className="h-5 w-5" />
-                {cartItemsCount > 0 && (
-                  <Badge
-                    className="absolute top-0 right-0 translate-x-1/2 -translate-y-1/2 flex h-4 w-4 min-w-[16px] items-center justify-center rounded-full p-0 text-[9px] bg-red-500 hover:bg-red-500 dark:bg-orange-500 dark:hover:bg-orange-500 text-white border-0 pointer-events-none"
-                    data-testid="badge-cart-count"
-                  >
-                    {cartItemsCount > 99 ? "99+" : cartItemsCount}
-                  </Badge>
-                )}
-              </span>
-            </Link>
+            <span className="relative inline-flex w-5 h-5">
+              <ShoppingCart className="h-5 w-5" />
+              {cartItemsCount > 0 && (
+                <Badge
+                  className="absolute top-0 right-0 translate-x-1/2 -translate-y-1/2 flex h-4 w-4 min-w-[16px] items-center justify-center rounded-full p-0 text-[9px] bg-red-500 hover:bg-red-500 dark:bg-orange-500 dark:hover:bg-orange-500 text-white border-0 pointer-events-none"
+                  data-testid="badge-cart-count"
+                >
+                  {cartItemsCount > 99 ? "99+" : cartItemsCount}
+                </Badge>
+              )}
+            </span>
           </Button>
 
           {/* Admin Panel Button */}
@@ -168,11 +199,17 @@ export function Header() {
                     Каталог
                   </Button>
                 </Link>
-                <Link href="/wishlist" onClick={() => setMobileMenuOpen(false)}>
-                  <Button variant="ghost" className="w-full justify-start" data-testid="link-wishlist-mobile">
-                    Избранное
-                  </Button>
-                </Link>
+                <Button 
+                  variant="ghost" 
+                  className="w-full justify-start" 
+                  data-testid="link-wishlist-mobile"
+                  onClick={(e) => {
+                    setMobileMenuOpen(false)
+                    handleProtectedNavigation(e, "/wishlist", "просмотра избранного")
+                  }}
+                >
+                  Избранное
+                </Button>
                 {isAuthenticated && hasStaffRole && (
                   <Link href="/admin" onClick={() => setMobileMenuOpen(false)}>
                     <Button variant="outline" className="w-full justify-start gap-2" data-testid="link-admin-panel-mobile">
@@ -240,6 +277,24 @@ export function Header() {
           </nav>
         </div>
       </div>
+
+      {/* Auth Dialog */}
+      <AlertDialog open={authDialogOpen} onOpenChange={setAuthDialogOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>{authDialogConfig.title}</AlertDialogTitle>
+            <AlertDialogDescription>
+              {authDialogConfig.description}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Отмена</AlertDialogCancel>
+            <AlertDialogAction onClick={handleAuthConfirm}>
+              Войти
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </header>
   )
 }
