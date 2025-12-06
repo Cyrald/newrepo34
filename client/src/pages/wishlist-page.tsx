@@ -90,7 +90,7 @@ export default function WishlistPage() {
                   key={item.id}
                   product={item.product}
                   onAddToCart={handleAddToCart}
-                  onAddToWishlist={handleRemoveFromWishlist}
+                  onToggleWishlist={handleRemoveFromWishlist}
                   isInWishlist={true}
                 />
               ))}

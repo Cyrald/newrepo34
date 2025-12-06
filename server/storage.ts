@@ -25,6 +25,7 @@ import {
   type CartItemWithProduct,
   type WishlistItem,
   type InsertWishlistItem,
+  type WishlistItemWithProduct,
   type SupportConversation,
   type SupportMessage,
   type InsertSupportMessage,
@@ -119,14 +120,14 @@ export interface IStorage {
   createOrder(order: InsertOrder): Promise<Order>;
   updateOrder(id: string, data: Partial<InsertOrder>): Promise<Order | undefined>;
   
-  getCartItems(userId: string): Promise<CartItem[]>;
+  getCartItems(userId: string): Promise<CartItemWithProduct[]>;
   getCartItem(userId: string, productId: string): Promise<CartItem | undefined>;
   addCartItem(item: InsertCartItem): Promise<CartItem>;
   updateCartItem(userId: string, productId: string, quantity: number): Promise<CartItem | undefined>;
   deleteCartItem(userId: string, productId: string): Promise<void>;
   clearCart(userId: string): Promise<void>;
   
-  getWishlistItems(userId: string): Promise<WishlistItem[]>;
+  getWishlistItems(userId: string): Promise<WishlistItemWithProduct[]>;
   addWishlistItem(item: InsertWishlistItem): Promise<WishlistItem>;
   deleteWishlistItem(userId: string, productId: string): Promise<void>;
   
@@ -563,8 +564,34 @@ export class DatabaseStorage implements IStorage {
     return order;
   }
 
-  async getCartItems(userId: string): Promise<CartItem[]> {
-    return db.select().from(cartItems).where(eq(cartItems.userId, userId));
+  async getCartItems(userId: string): Promise<CartItemWithProduct[]> {
+    const items = await db
+      .select()
+      .from(cartItems)
+      .leftJoin(products, eq(cartItems.productId, products.id))
+      .where(eq(cartItems.userId, userId));
+
+    const validItems = items.filter(item => item.products && !item.products.isArchived);
+
+    const itemsWithImages: CartItemWithProduct[] = [];
+    
+    for (const item of validItems) {
+      if (!item.products || item.products.isArchived) {
+        continue;
+      }
+      
+      const images = await this.getProductImages(item.products.id);
+      
+      itemsWithImages.push({
+        ...item.cart_items,
+        product: {
+          ...item.products,
+          images,
+        },
+      });
+    }
+
+    return itemsWithImages;
   }
 
   async getCartItem(userId: string, productId: string): Promise<CartItem | undefined> {
@@ -604,8 +631,34 @@ export class DatabaseStorage implements IStorage {
     await db.delete(cartItems).where(eq(cartItems.userId, userId));
   }
 
-  async getWishlistItems(userId: string): Promise<WishlistItem[]> {
-    return db.select().from(wishlistItems).where(eq(wishlistItems.userId, userId));
+  async getWishlistItems(userId: string): Promise<WishlistItemWithProduct[]> {
+    const items = await db
+      .select()
+      .from(wishlistItems)
+      .leftJoin(products, eq(wishlistItems.productId, products.id))
+      .where(eq(wishlistItems.userId, userId));
+
+    const validItems = items.filter(item => item.products && !item.products.isArchived);
+
+    const itemsWithImages: WishlistItemWithProduct[] = [];
+    
+    for (const item of validItems) {
+      if (!item.products || item.products.isArchived) {
+        continue;
+      }
+      
+      const images = await this.getProductImages(item.products.id);
+      
+      itemsWithImages.push({
+        ...item.wishlist_items,
+        product: {
+          ...item.products,
+          images,
+        },
+      });
+    }
+
+    return itemsWithImages;
   }
 
   async addWishlistItem(item: InsertWishlistItem): Promise<WishlistItem> {

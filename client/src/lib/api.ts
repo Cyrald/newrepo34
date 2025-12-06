@@ -164,6 +164,7 @@ async function fetchApi<T>(
       accessToken = null;
       if (typeof window !== 'undefined' && !window.location.pathname.startsWith('/login')) {
         window.location.href = "/login";
+        return new Promise(() => {}) as Promise<T>;
       }
       throw new ApiError(401, "Сессия истекла", "SESSION_EXPIRED");
     }
